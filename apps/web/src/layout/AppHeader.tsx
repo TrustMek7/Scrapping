@@ -3,7 +3,6 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 import { useSidebar } from "../context/SidebarContext";
 import { ThemeToggleButton } from "../components/common/ThemeToggleButton";
-import { AlertIcon } from "../icons";
 
 const AppHeader: React.FC = () => {
   const [isApplicationMenuOpen, setApplicationMenuOpen] = useState(false);
@@ -83,9 +82,11 @@ const AppHeader: React.FC = () => {
           </button>
 
           <Link to="/" className="flex items-center gap-2 lg:hidden">
-            <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-brand-500 text-white shrink-0">
-              <AlertIcon className="w-5 h-5" />
-            </span>
+            <img
+              src="/images/logo/nacion.jpg"
+              alt="Nación"
+              className="w-8 h-8 rounded-lg object-cover shrink-0"
+            />
             <span className="text-base font-semibold text-gray-800 dark:text-white/90">
               Alertas Nación
             </span>
