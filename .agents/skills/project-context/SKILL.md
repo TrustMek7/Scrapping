@@ -19,6 +19,19 @@ veracidad de acusaciones. El flujo conceptual es:
 Detectar → Contextualizar → Clasificar → Resumir → Alertar → Revisión humana de la fuente original
 ```
 
+Dominio: las entidades monitoreadas son actores políticos (partidos, candidatos) y lo que se
+detecta son ataques/menciones de índole política. Esto hace más crítica todavía la regla de
+"la IA no es fuente de verdad" — un error de clasificación acá no es un detalle técnico, es
+convertir una acusación política en un hecho afirmado sobre una persona real.
+
+## Reglas de colaboración con el agente
+
+- **Antes de proponer o implementar una integración con un servicio externo** (proveedor de
+  IA, mensajería, email, etc.), **preguntar primero de dónde debe venir** (qué proveedor,
+  con qué credenciales) — no asumir un proveedor por defecto (p.ej. no asumir Anthropic/Claude
+  solo por ser el ecosistema del propio Claude Code). El usuario puede ya tener una API key de
+  otro proveedor (ej. DeepSeek) que prefiera usar.
+
 ## Arquitectura implementada
 
 Monorepo con pnpm workspaces:
@@ -151,17 +164,33 @@ Completado:
 - Monorepo scaffolded (`apps/web`, `apps/backend`, `packages/shared`, `prisma/`).
 - PostgreSQL en Docker, migración inicial aplicada (`prisma/migrations/`).
 - Backend NestJS mínimo con `PrismaService` y `GET /health` (verifica DB).
-- `packages/shared` con los tipos de análisis y de fuente.
+- `packages/shared` con los tipos de análisis y de fuente (esquemas Zod, no solo tipos TS).
+- Pipeline de IA (`apps/backend/src/analysis/`): `AIProvider` abstraído + `DeepSeekProvider`
+  (proveedor activo — ver más abajo), prompt versionado, validación con Zod, persistencia de
+  `Analysis` y creación de `Alert` según reglas configurables (`ALERT_CATEGORIES`,
+  `ALERT_MIN_CONFIDENCE`). Probable vía `POST /analysis/preview` (sin persistir) y
+  `POST /analysis/run` (flujo completo, requiere un `Source` existente).
+
+**Proveedor de IA activo: DeepSeek**, no Anthropic/Claude. Modelo `deepseek-v4-flash`
+(configurable vía `DEEPSEEK_MODEL`), API compatible con OpenAI (`baseURL:
+https://api.deepseek.com`, paquete `openai` npm, no `@anthropic-ai/sdk`). A diferencia de
+otros proveedores, DeepSeek no valida el esquema de salida del lado del servidor: se pide
+`response_format: {type: "json_object"}` y el esquema se describe dentro del propio prompt
+(`analysis/prompts/analyze.prompt.ts`); la validación real ocurre después, en el backend, con
+`AnalysisResultSchema.safeParse()`. Si se cambia de proveedor en el futuro, implementar una
+nueva clase que cumpla `AIProvider` (`analysis/ai-provider.interface.ts`) y cambiar el binding
+en `analysis.module.ts` — no tocar `AnalysisService` ni el prompt.
 
 Pendiente (según las etapas del enfoque original):
-- CRUD de fuentes y entidades en el backend.
+- CRUD de fuentes y entidades en el backend (por ahora hay que crear `Source`/`MonitoredEntity`
+  manualmente vía `pnpm db:studio` para poder probar `POST /analysis/run`).
 - Layout, sidebar y páginas reales del dashboard en `apps/web` (fuentes, entidades,
   publicaciones, alertas).
 - Primer conector de scraping (empezar por una web sencilla; RSS antes que redes sociales;
-  Facebook/Instagram al final y solo si hay un mecanismo de acceso permitido).
-- Pipeline de IA: detección de entidad, clasificación, resumen, validación con Zod.
-- Reglas de alerta configurables en el backend.
-- Integración SendPulse/WhatsApp y, opcionalmente, email.
+  Facebook/Instagram al final y solo si hay un mecanismo de acceso permitido) — hoy la única
+  forma de meter una publicación es manualmente vía `POST /analysis/run`.
+- Integración SendPulse/WhatsApp y, opcionalmente, email (las `Alert` ya se crean, pero no se
+  envía ninguna notificación todavía — el modelo `Notification` existe pero no se usa).
 - PWA (manifest, instalación, push opcional) y ejecución periódica configurable
   (`SCRAPING_INTERVAL_MINUTES`).
 

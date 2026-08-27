@@ -16,8 +16,10 @@
     "@nestjs/platform-express": "^10.4.15",
     "@nestjs/schedule": "^4.1.2",
     "@scrapping/shared": "workspace:*",
+    "openai": "^7.7.0",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "@nestjs/cli": "^10.4.9",

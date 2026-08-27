@@ -7,3 +7,6 @@ allowBuilds:
   '@prisma/engines': true
   esbuild: true
   prisma: true
+minimumReleaseAgeExclude:
+  - '@anthropic-ai/sdk@0.121.0'
+  - openai@7.7.0

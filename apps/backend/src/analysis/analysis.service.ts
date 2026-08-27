@@ -1,0 +1,185 @@
+import { Inject, Injectable, Logger } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import { createHash } from "node:crypto";
+import { AnalysisResult } from "@scrapping/shared";
+import { PrismaService } from "../prisma/prisma.service";
+import { AI_PROVIDER, AIProvider, AnalysisInput, MonitoredEntityInput } from "./ai-provider.interface";
+
+export interface RunAnalysisInput {
+  sourceId: string;
+  title: string;
+  content: string;
+  url: string;
+  externalId?: string;
+  publishedAt?: Date;
+}
+
+@Injectable()
+export class AnalysisService {
+  private readonly logger = new Logger(AnalysisService.name);
+
+  constructor(
+    @Inject(AI_PROVIDER) private readonly aiProvider: AIProvider,
+    private readonly prisma: PrismaService,
+    private readonly config: ConfigService,
+  ) {}
+
+  /** Corre el análisis sin persistir nada — útil para probar el prompt/modelo. */
+  async preview(input: {
+    title: string;
+    content: string;
+    sourceName: string;
+    publishedAt?: Date;
+  }): Promise<AnalysisResult> {
+    const monitoredEntities = await this.loadMonitoredEntities();
+    return this.aiProvider.analyze({ ...input, monitoredEntities });
+  }
+
+  /**
+   * Flujo completo: guarda la publicación (con deduplicación), la analiza,
+   * guarda el análisis y, si corresponde según las reglas de alerta, crea la alerta.
+   * La IA nunca decide la alerta: solo propone; esta función decide.
+   */
+  async runAndPersist(input: RunAnalysisInput) {
+    const contentHash = createHash("sha256").update(input.content).digest("hex");
+
+    const existing = await this.prisma.publication.findUnique({ where: { contentHash } });
+    if (existing) {
+      this.logger.log(`[SCRAPER] publicación duplicada, se omite (contentHash=${contentHash})`);
+      return { publication: existing, analysis: await this.prisma.analysis.findUnique({ where: { publicationId: existing.id } }), alert: null, deduplicated: true };
+    }
+
+    const publication = await this.prisma.publication.create({
+      data: {
+        sourceId: input.sourceId,
+        externalId: input.externalId,
+        title: input.title,
+        content: input.content,
+        url: input.url,
+        contentHash,
+        publishedAt: input.publishedAt,
+      },
+    });
+
+    const monitoredEntities = await this.prisma.monitoredEntity.findMany();
+
+    let result: AnalysisResult;
+    try {
+      result = await this.aiProvider.analyze({
+        title: input.title,
+        content: input.content,
+        sourceName: (await this.prisma.source.findUniqueOrThrow({ where: { id: input.sourceId } })).name,
+        publishedAt: input.publishedAt,
+        monitoredEntities: monitoredEntities.map((e) => ({ name: e.name, aliases: e.aliases })),
+      });
+    } catch (error) {
+      this.logger.error(`[ANALYSIS] falló el análisis: ${(error as Error).message}`);
+      const analysis = await this.prisma.analysis.create({
+        data: {
+          publicationId: publication.id,
+          status: "FAILED",
+          error: (error as Error).message,
+        },
+      });
+      return { publication, analysis, alert: null, deduplicated: false };
+    }
+
+    const analysis = await this.prisma.analysis.create({
+      data: {
+        publicationId: publication.id,
+        status: "COMPLETED",
+        relevant: result.relevant,
+        category: result.category,
+        severity: result.severity,
+        confidence: result.confidence,
+        summary: result.summary,
+        reason: result.reason,
+        claims: result.claims,
+        rawOutput: result as unknown as object,
+      },
+    });
+
+    await this.linkMatchedEntities(publication.id, result.entities, monitoredEntities);
+
+    const alert = await this.maybeCreateAlert(analysis.id, publication.id, result, monitoredEntities);
+
+    return { publication, analysis, alert, deduplicated: false };
+  }
+
+  private async loadMonitoredEntities(): Promise<MonitoredEntityInput[]> {
+    const entities = await this.prisma.monitoredEntity.findMany();
+    return entities.map((e) => ({ name: e.name, aliases: e.aliases }));
+  }
+
+  private async linkMatchedEntities(
+    publicationId: string,
+    matches: AnalysisResult["entities"],
+    monitoredEntities: { id: string; name: string; aliases: string[] }[],
+  ) {
+    for (const match of matches) {
+      const entity = this.resolveEntity(match.name, monitoredEntities);
+      if (!entity) continue;
+      await this.prisma.publicationEntity.upsert({
+        where: { publicationId_entityId: { publicationId, entityId: entity.id } },
+        create: { publicationId, entityId: entity.id, confidence: match.confidence },
+        update: { confidence: match.confidence },
+      });
+    }
+  }
+
+  /**
+   * Reglas de alerta (backend decide, no la IA — ver skill de contexto).
+   * Umbrales configurables vía ALERT_CATEGORIES / ALERT_MIN_CONFIDENCE.
+   */
+  private async maybeCreateAlert(
+    analysisId: string,
+    publicationId: string,
+    result: AnalysisResult,
+    monitoredEntities: { id: string; name: string; aliases: string[] }[],
+  ) {
+    if (!result.relevant) return null;
+
+    const alertCategories = (this.config.get<string>("ALERT_CATEGORIES") ?? "")
+      .split(",")
+      .map((c) => c.trim())
+      .filter(Boolean);
+    const minConfidence = Number(this.config.get<string>("ALERT_MIN_CONFIDENCE") ?? "0.7");
+
+    if (!alertCategories.includes(result.category)) return null;
+    if (result.confidence < minConfidence) return null;
+
+    const topMatch = [...result.entities].sort((a, b) => b.confidence - a.confidence)[0];
+    const entity = topMatch ? this.resolveEntity(topMatch.name, monitoredEntities) : undefined;
+    if (!entity) {
+      this.logger.warn("[ALERT] categoría/confianza superan el umbral pero no se pudo resolver la entidad; no se crea alerta");
+      return null;
+    }
+
+    const alert = await this.prisma.alert.create({
+      data: {
+        analysisId,
+        publicationId,
+        entityId: entity.id,
+        category: result.category,
+        severity: result.severity,
+        confidence: result.confidence,
+        summary: result.summary,
+      },
+    });
+
+    this.logger.log(`[ALERT] alerta creada (publicationId=${publicationId}, entity=${entity.name})`);
+    return alert;
+  }
+
+  private resolveEntity(
+    name: string,
+    monitoredEntities: { id: string; name: string; aliases: string[] }[],
+  ) {
+    const normalized = name.trim().toLowerCase();
+    return monitoredEntities.find(
+      (e) =>
+        e.name.trim().toLowerCase() === normalized ||
+        e.aliases.some((alias) => alias.trim().toLowerCase() === normalized),
+    );
+  }
+}

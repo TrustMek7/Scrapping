@@ -1,42 +1,52 @@
-export type ContentCategory =
-  | "POSITIVE"
-  | "NEUTRAL"
-  | "CRITICISM"
-  | "COMPLAINT"
-  | "ALLEGATION"
-  | "DENUNCIA"
-  | "SCANDAL"
-  | "OTHER_RELEVANT"
-  | "IRRELEVANT";
+import { z } from "zod";
 
-export type Severity = "LOW" | "MEDIUM" | "HIGH";
+export const ContentCategorySchema = z.enum([
+  "POSITIVE",
+  "NEUTRAL",
+  "CRITICISM",
+  "COMPLAINT",
+  "ALLEGATION",
+  "DENUNCIA",
+  "SCANDAL",
+  "OTHER_RELEVANT",
+  "IRRELEVANT",
+]);
+export type ContentCategory = z.infer<typeof ContentCategorySchema>;
 
-export type ClaimType =
-  | "FACT"
-  | "REPORTED_CLAIM"
-  | "OPINION"
-  | "ALLEGATION"
-  | "DENIAL"
-  | "UNVERIFIED";
+export const SeveritySchema = z.enum(["LOW", "MEDIUM", "HIGH"]);
+export type Severity = z.infer<typeof SeveritySchema>;
 
-export interface AnalysisClaim {
-  text: string;
-  type: ClaimType;
-}
+export const ClaimTypeSchema = z.enum([
+  "FACT",
+  "REPORTED_CLAIM",
+  "OPINION",
+  "ALLEGATION",
+  "DENIAL",
+  "UNVERIFIED",
+]);
+export type ClaimType = z.infer<typeof ClaimTypeSchema>;
 
-export interface AnalysisEntityMatch {
-  name: string;
-  confidence: number;
-}
+export const AnalysisClaimSchema = z.object({
+  text: z.string(),
+  type: ClaimTypeSchema,
+});
+export type AnalysisClaim = z.infer<typeof AnalysisClaimSchema>;
 
-/** Salida estructurada que debe producir el pipeline de IA (ver skill, sección 11). */
-export interface AnalysisResult {
-  relevant: boolean;
-  entities: AnalysisEntityMatch[];
-  category: ContentCategory;
-  severity: Severity;
-  confidence: number;
-  summary: string;
-  reason: string;
-  claims: AnalysisClaim[];
-}
+export const AnalysisEntityMatchSchema = z.object({
+  name: z.string(),
+  confidence: z.number().min(0).max(1),
+});
+export type AnalysisEntityMatch = z.infer<typeof AnalysisEntityMatchSchema>;
+
+/** Salida estructurada que debe producir el pipeline de IA (ver skill de contexto, sección "Reglas de negocio invariables"). */
+export const AnalysisResultSchema = z.object({
+  relevant: z.boolean(),
+  entities: z.array(AnalysisEntityMatchSchema),
+  category: ContentCategorySchema,
+  severity: SeveritySchema,
+  confidence: z.number().min(0).max(1),
+  summary: z.string(),
+  reason: z.string(),
+  claims: z.array(AnalysisClaimSchema),
+});
+export type AnalysisResult = z.infer<typeof AnalysisResultSchema>;
