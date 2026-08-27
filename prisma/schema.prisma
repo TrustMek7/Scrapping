@@ -1,0 +1,168 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SourceType {
+  WEBSITE
+  RSS
+  FACEBOOK
+  INSTAGRAM
+  OTHER
+}
+
+enum SourceStatus {
+  ACTIVE
+  ERROR
+  DISABLED
+}
+
+enum ContentCategory {
+  POSITIVE
+  NEUTRAL
+  CRITICISM
+  COMPLAINT
+  ALLEGATION
+  DENUNCIA
+  SCANDAL
+  OTHER_RELEVANT
+  IRRELEVANT
+}
+
+enum Severity {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum ClaimType {
+  FACT
+  REPORTED_CLAIM
+  OPINION
+  ALLEGATION
+  DENIAL
+  UNVERIFIED
+}
+
+enum AnalysisStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+enum NotificationChannel {
+  WHATSAPP
+  EMAIL
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+model Source {
+  id                String       @id @default(cuid())
+  name              String
+  type              SourceType
+  url               String
+  status            SourceStatus @default(ACTIVE)
+  lastRunAt         DateTime?
+  lastPublicationAt DateTime?
+  lastError         String?
+  publicationsCount Int          @default(0)
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  publications Publication[]
+}
+
+model MonitoredEntity {
+  id        String   @id @default(cuid())
+  name      String
+  aliases   String[] @default([])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  publicationEntities PublicationEntity[]
+}
+
+model Publication {
+  id           String    @id @default(cuid())
+  sourceId     String
+  source       Source    @relation(fields: [sourceId], references: [id])
+  externalId   String?
+  title        String
+  content      String
+  url          String
+  canonicalUrl String?
+  contentHash  String    @unique
+  publishedAt  DateTime?
+  createdAt    DateTime  @default(now())
+
+  entities PublicationEntity[]
+  analysis Analysis?
+
+  @@unique([sourceId, externalId])
+  @@index([url])
+}
+
+model PublicationEntity {
+  id            String          @id @default(cuid())
+  publicationId String
+  publication   Publication     @relation(fields: [publicationId], references: [id])
+  entityId      String
+  entity        MonitoredEntity @relation(fields: [entityId], references: [id])
+  confidence    Float
+
+  @@unique([publicationId, entityId])
+}
+
+model Analysis {
+  id            String           @id @default(cuid())
+  publicationId String           @unique
+  publication   Publication      @relation(fields: [publicationId], references: [id])
+  status        AnalysisStatus   @default(PENDING)
+  relevant      Boolean?
+  category      ContentCategory?
+  severity      Severity?
+  confidence    Float?
+  summary       String?
+  reason        String?
+  claims        Json?
+  rawOutput     Json?
+  error         String?
+  createdAt     DateTime         @default(now())
+
+  alert Alert?
+}
+
+model Alert {
+  id            String   @id @default(cuid())
+  analysisId    String   @unique
+  analysis      Analysis @relation(fields: [analysisId], references: [id])
+  publicationId String
+  entityId      String
+  category      ContentCategory
+  severity      Severity
+  confidence    Float
+  summary       String
+  createdAt     DateTime @default(now())
+
+  notifications Notification[]
+}
+
+model Notification {
+  id        String              @id @default(cuid())
+  alertId   String
+  alert     Alert               @relation(fields: [alertId], references: [id])
+  channel   NotificationChannel
+  status    NotificationStatus  @default(PENDING)
+  error     String?
+  sentAt    DateTime?
+  createdAt DateTime            @default(now())
+}

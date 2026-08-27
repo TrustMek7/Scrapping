@@ -12,6 +12,16 @@ dist
 dist-ssr
 *.local
 
+# Env
+.env
+!.env.example
+
+# Prisma
+/prisma/generated
+
+# pnpm
+.pnpm-store
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
