@@ -89,6 +89,7 @@ model MonitoredEntity {
   updatedAt DateTime @updatedAt
 
   publicationEntities PublicationEntity[]
+  alerts              Alert[]
 }
 
 model Publication {
@@ -106,6 +107,7 @@ model Publication {
 
   entities PublicationEntity[]
   analysis Analysis?
+  alerts   Alert[]
 
   @@unique([sourceId, externalId])
   @@index([url])
@@ -146,7 +148,9 @@ model Alert {
   analysisId    String   @unique
   analysis      Analysis @relation(fields: [analysisId], references: [id])
   publicationId String
+  publication   Publication     @relation(fields: [publicationId], references: [id])
   entityId      String
+  entity        MonitoredEntity @relation(fields: [entityId], references: [id])
   category      ContentCategory
   severity      Severity
   confidence    Float
