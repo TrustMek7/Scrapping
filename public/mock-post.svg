@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" role="img" aria-labelledby="title description">
+  <title id="title">Estantería de prueba</title>
+  <desc id="description">Ilustración geométrica de libros para validar imágenes de publicaciones</desc>
+  <rect width="1200" height="800" fill="#d9dfd0"/>
+  <circle cx="1030" cy="130" r="220" fill="#ef693f"/>
+  <rect x="110" y="130" width="720" height="540" rx="8" fill="#1e2a26"/>
+  <path d="M160 300h620M160 485h620" stroke="#f4f0e6" stroke-width="12"/>
+  <g fill="#e6c45c">
+    <rect x="180" y="180" width="70" height="120"/>
+    <rect x="270" y="155" width="95" height="145"/>
+    <rect x="570" y="190" width="65" height="110"/>
+    <rect x="650" y="165" width="105" height="135"/>
+  </g>
+  <g fill="#ef693f">
+    <rect x="390" y="205" width="55" height="95"/>
+    <rect x="465" y="175" width="80" height="125"/>
+    <rect x="180" y="350" width="100" height="135"/>
+    <rect x="300" y="380" width="70" height="105"/>
+  </g>
+  <g fill="#8da69a">
+    <rect x="400" y="340" width="90" height="145"/>
+    <rect x="510" y="370" width="60" height="115"/>
+    <rect x="590" y="345" width="80" height="140"/>
+    <rect x="690" y="390" width="65" height="95"/>
+  </g>
+  <text x="110" y="740" fill="#1e2a26" font-family="monospace" font-size="32" letter-spacing="6">IMAGEN MOCK / FASE 02</text>
+</svg>
