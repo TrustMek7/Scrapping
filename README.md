@@ -1,204 +1,76 @@
-# TailAdmin React - Free React Tailwind Admin Dashboard Template
+# Scrapping — Monitor de Publicaciones Públicas
 
-TailAdmin is a free and open-source admin dashboard template built on **React and Tailwind CSS**, providing developers
-with everything they need to create a comprehensive, data-driven back-end,
-dashboard, or admin panel solution for upcoming web projects.
+Aplicación local de monitoreo de publicaciones públicas: consulta fuentes configuradas (webs, RSS, redes sociales compatibles), detecta menciones a entidades monitoreadas, las analiza con IA (clasificación + resumen neutral) y genera alertas por WhatsApp (SendPulse) y/o email. Todo corre en una sola computadora, sin infraestructura cloud.
 
-With TailAdmin, you get access to all the necessary dashboard UI components, elements, and pages required to build a
-feature-rich and complete dashboard or admin panel. Whether you're building dashboard or admin panel for a complex web
-application or a simple website, TailAdmin is the perfect solution to help you get up and running quickly.
+> El contexto completo del proyecto (arquitectura, reglas de negocio, estado de implementación, decisiones técnicas) vive en el skill [`.agents/skills/project-context/SKILL.md`](.agents/skills/project-context/SKILL.md). Este README es solo la puesta en marcha rápida.
 
-![TailAdmin React.js Dashboard Preview](./banner.png)
+## Arquitectura
 
-## Overview
-
-TailAdmin provides essential UI components and layouts for building feature-rich, data-driven admin dashboards and
-control panels. It's built on:
-
-- React 19
-- TypeScript
-- Tailwind CSS v4
-
-### Quick Links
-
-- [✨ Visit Website](https://tailadmin.com)
-- [📄 Documentation](https://tailadmin.com/docs)
-- [⬇️ Download](https://tailadmin.com/download)
-- [🖌️ Figma Design File (Community Edition)](https://www.figma.com/community/file/1214477970819985778)
-- [⚡ Get PRO Version](https://tailadmin.com/pricing)
-
-### Demos
-
-- [Free Version](https://free-react-demo.tailadmin.com/)
-- [Pro Version](https://react-demo.tailadmin.com)
-
-### Other Versions
-
-- [HTML Version](https://github.com/TailAdmin/tailadmin-free-tailwind-dashboard-template)
-- [Next.js Version](https://github.com/TailAdmin/free-nextjs-admin-dashboard)
-- [Vue.js Version](https://github.com/TailAdmin/vue-tailwind-admin-dashboard)
-- [Angular Version](https://github.com/TailAdmin/free-angular-tailwind-dashboard)
-- [Laravel Version](https://github.com/TailAdmin/tailadmin-laravel)
-
-## Installation
-
-### Prerequisites
-
-To get started with TailAdmin, ensure you have the following prerequisites installed and set up:
-
-- Node.js 18.x or later (recommended to use Node.js 20.x or later)
-
-### Cloning the Repository
-
-Clone the repository using the following command:
-
-```bash
-git clone https://github.com/TailAdmin/free-react-tailwind-admin-dashboard.git
+```text
+PC LOCAL
+│
+├── apps/web        React + Vite + TypeScript + Tailwind + shadcn/ui (PWA)
+├── apps/backend    NestJS + TypeScript + Prisma (API, scraping, IA, alertas)
+├── packages/shared Tipos y contratos compartidos entre web y backend
+├── prisma/         Esquema y migraciones de PostgreSQL
+└── PostgreSQL      Corriendo en Docker (un único contenedor, sin más servicios)
 ```
 
-> Windows Users: place the repository near the root of your drive if you face issues while cloning.
+## Requisitos
 
-1. Install dependencies:
+- Node.js 20+
+- [pnpm](https://pnpm.io/) (`npm install -g pnpm`)
+- Docker Desktop (solo se usa para levantar PostgreSQL)
 
-   ```bash
-   npm install
-   # or
-   yarn install
-   ```
+Este proyecto es un **workspace de pnpm**. No uses `npm install` en la raíz: rompe la instalación porque npm no entiende `pnpm-workspace.yaml`.
 
-2. Start the development server:
-   ```bash
-   npm run dev
-   # or
-   yarn dev
-   ```
+## Puesta en marcha
 
-## Components
+```bash
+git clone <este-repo>
+cd Scrapping
 
-TailAdmin is a pre-designed starting point for building a web-based dashboard using React.js and Tailwind CSS. The
-template includes:
+cp .env.example .env      # completar credenciales si aplica (SendPulse, email)
 
-- Sophisticated and accessible sidebar
-- Data visualization components
-- Prebuilt profile management and 404 page
-- Tables and Charts(Line and Bar)
-- Authentication forms and input elements
-- Alerts, Dropdowns, Modals, Buttons and more
-- FAQ & Accordion, Testimonials, and Carousels
-- Can't forget Dark Mode 🕶️
+pnpm install               # instala apps/web, apps/backend, packages/shared y raíz
+pnpm docker:db:up          # levanta PostgreSQL en Docker (puerto 5433, ver nota abajo)
+pnpm db:migrate            # aplica las migraciones de Prisma
+```
 
-All components are built with React and styled using Tailwind CSS for easy customization.
+Luego, en dos terminales separadas:
 
-## Feature Comparison
+```bash
+pnpm dev:backend   # NestJS en http://localhost:3000 (health check en /health)
+pnpm dev:web       # Vite en http://localhost:5173
+```
 
-### Free Version
+### Nota sobre el puerto de PostgreSQL
 
-- 1 Unique Dashboard
-- 35+ dashboard components
-- 50+ UI elements
-- Basic Figma design files
-- Community support
+El contenedor Docker expone PostgreSQL en el **puerto 5433**, no en el 5432 por defecto, porque muchas máquinas (incluida la de desarrollo original) ya tienen un PostgreSQL nativo instalado ocupando el 5432. Si tu máquina no tiene ese conflicto, puedes cambiar `POSTGRES_PORT` y `DATABASE_URL` en `.env` a 5432 sin problema.
 
-### Pro Version
+## Scripts disponibles (raíz)
 
-- 7 Unique Dashboards: Analytics, Ecommerce, Marketing, CRM, SaaS, Stocks, Logistics (more coming soon)
-- 500+ dashboard components and UI elements
-- Complete Figma design file
-- Email support
+| Script | Descripción |
+|---|---|
+| `pnpm dev:web` | Levanta el frontend (Vite) |
+| `pnpm dev:backend` | Levanta el backend (NestJS, modo watch) |
+| `pnpm build` | Compila todos los paquetes del workspace |
+| `pnpm lint` | Lint de todos los paquetes |
+| `pnpm docker:db:up` / `pnpm docker:db:down` | Levanta/detiene el contenedor de PostgreSQL |
+| `pnpm db:migrate` | Aplica migraciones de Prisma (`prisma migrate dev`) |
+| `pnpm db:generate` | Regenera el cliente de Prisma |
+| `pnpm db:studio` | Abre Prisma Studio para inspeccionar la base de datos |
 
-To learn more about pro version features and pricing, visit our [pricing page](https://tailadmin.com/pricing).
+## Mover el proyecto a otro dispositivo
 
-## Changelog
+1. Instalar Node.js 20+, pnpm y Docker Desktop en el nuevo dispositivo.
+2. Copiar el repositorio (o `git clone`) y el archivo `.env` (no está versionado).
+3. `pnpm install`
+4. `pnpm docker:db:up`
+5. `pnpm db:migrate`
 
-### Version 2.3.0 - [April 28, 2026]
-- Added **AI Dashboard** with token usage and revenue tracking.
-- Added **Sales Dashboard** with retention and multi-channel analytics.
-- Added **Finance Dashboard** with cashflow and balance management.
-- Introduced **6 New Layout variations** for improved UI flexibility.
-- Integrated **Advanced Data Visualization** with 7+ new chart types.
+No se requiere reinstalar ni configurar PostgreSQL manualmente: el contenedor y su volumen recrean la base de datos igual en cualquier equipo con Docker.
 
-### Version 2.1.0 - [Dec 30, 2025]
+## Licencia
 
-- Resolved Date Picker positioning and input issues in Charts.
-
-### Version 2.0.2 - [March 25, 2025]
-
-- Upgraded to React 19
-- Included overrides for packages to prevent peer dependency errors.
-- Migrated from react-flatpickr to flatpickr package for React 19 support
-
-### Version 2.0.1 - [February 27, 2025]
-
-#### Update Overview
-
-- Upgraded to Tailwind CSS v4 for better performance and efficiency.
-- Updated class usage to match the latest syntax and features.
-- Replaced deprecated class and optimized styles.
-
-#### Next Steps
-
-- Run npm install or yarn install to update dependencies.
-- Check for any style changes or compatibility issues.
-- Refer to the Tailwind CSS v4 [Migration Guide](https://tailwindcss.com/docs/upgrade-guide) on this release. if needed.
-- This update keeps the project up to date with the latest Tailwind improvements. 🚀
-
-### Version 2.0.0 - [February 2025]
-
-A major update with comprehensive redesign and modern React patterns implementation.
-
-#### Major Improvements
-
-- Complete UI redesign with modern React patterns
-- New features: collapsible sidebar, chat, and calendar
-- Improved performance and accessibility
-- Updated data visualization using ApexCharts
-
-#### Key Features
-
-- Redesigned dashboards (Ecommerce, Analytics, Marketing, CRM)
-- Enhanced navigation with React Router integration
-- Advanced tables with sorting and filtering
-- Calendar with drag-and-drop support
-- New UI components and improved existing ones
-
-#### Breaking Changes
-
-- Updated sidebar component API
-- Migrated charts to ApexCharts
-- Revised authentication system
-
-[Read more](https://tailadmin.com/docs/update-logs/react) on this release.
-
-### Version 1.3.7 - [June 20, 2024]
-
-#### Enhancements
-
-1. Remove Repetition of DefaultLayout in every Pages
-2. Add ClickOutside Component for reduce repeated functionality in Header Message, Notification and User Dropdowns.
-
-### Version 1.3.6 - [Jan 31, 2024]
-
-#### Enhancements
-
-1. Integrate flatpickr in [Date Picker/Form Elements]
-2. Change color after select an option [Select Element/Form Elements].
-3. Make it functional [Multiselect Dropdown/Form Elements].
-4. Make best value editable [Pricing Table One/Pricing Table].
-5. Rearrange Folder structure.
-
-### Version 1.2.0 - [Apr 28, 2023]
-
-- Add Typescript in TailAdmin React.
-
-### Version 1.0.0 - Initial Release - [Mar 13, 2023]
-
-- Initial release of TailAdmin React.
-
-## License
-
-TailAdmin React.js Free Version is released under the MIT License.
-
-## Support
-
-If you find this project helpful, please consider giving it a star on GitHub. Your support helps us continue developing
-and maintaining this template.
+`apps/web` parte de la plantilla [TailAdmin React](https://tailadmin.com) (MIT License, ver [LICENSE.md](LICENSE.md)) como base de componentes UI.
