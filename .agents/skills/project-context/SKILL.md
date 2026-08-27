@@ -181,16 +181,31 @@ otros proveedores, DeepSeek no valida el esquema de salida del lado del servidor
 nueva clase que cumpla `AIProvider` (`analysis/ai-provider.interface.ts`) y cambiar el binding
 en `analysis.module.ts` — no tocar `AnalysisService` ni el prompt.
 
+- CRUD de fuentes (`apps/backend/src/sources/`, `GET/POST/PATCH/DELETE /sources`) y de
+  entidades monitoreadas (`apps/backend/src/entities/`, mismos verbos en `/entities`),
+  validado con los esquemas Zod de `@scrapping/shared` (`source.ts`, `entity.ts`).
+- Frontend real (ya no la plantilla TailAdmin sin tocar): se limpiaron todas las páginas/rutas
+  demo del template (Calendar, User Profile, Forms, Tables, Charts, UI Elements, Auth, Blank,
+  el dashboard Ecommerce falso, el dropdown de usuario/notificaciones falso, el widget de
+  "Purchase Plan") — solo quedan las rutas reales bajo "Monitoreo": `/monitoreo/alertas`,
+  `/monitoreo/fuentes`, `/monitoreo/entidades` (listado + modal de alta/edición para las dos
+  últimas). `/` redirige a `/monitoreo/alertas`; cualquier ruta no reconocida cae en el 404
+  real (`pages/OtherPage/NotFound.tsx`, ya existía, solo se conectó bien). Marca del proyecto:
+  "Alertas Nación" (sidebar, header móvil, `<title>`) — reemplaza el branding TailAdmin.
+  Se conservó la librería de componentes reutilizables de TailAdmin (`components/ui`,
+  `components/form` sin las demos de `form-elements`, `components/common`) porque Etapa 4
+  todavía la necesita.
+
 Pendiente (según las etapas del enfoque original):
-- CRUD de fuentes y entidades en el backend (por ahora hay que crear `Source`/`MonitoredEntity`
-  manualmente vía `pnpm db:studio` para poder probar `POST /analysis/run`).
-- Layout, sidebar y páginas reales del dashboard en `apps/web` (fuentes, entidades,
-  publicaciones, alertas).
+- Página de Publicaciones en el frontend (el modelo y los datos ya existen vía `Analysis`,
+  falta la vista).
 - Primer conector de scraping (empezar por una web sencilla; RSS antes que redes sociales;
   Facebook/Instagram al final y solo si hay un mecanismo de acceso permitido) — hoy la única
   forma de meter una publicación es manualmente vía `POST /analysis/run`.
-- Integración SendPulse/WhatsApp y, opcionalmente, email (las `Alert` ya se crean, pero no se
-  envía ninguna notificación todavía — el modelo `Notification` existe pero no se usa).
+- Integración SendPulse/WhatsApp y, opcionalmente, email (las `Alert` ya se crean y son
+  visibles en el dashboard — decisión explícita del usuario de que la notificación sea local
+  por ahora, no por WhatsApp/email; el modelo `Notification` existe en el schema pero no se
+  usa todavía).
 - PWA (manifest, instalación, push opcional) y ejecución periódica configurable
   (`SCRAPING_INTERVAL_MINUTES`).
 

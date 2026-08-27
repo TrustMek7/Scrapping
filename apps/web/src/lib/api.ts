@@ -1,6 +1,28 @@
-import type { ContentCategory, Severity } from "@scrapping/shared";
+import type {
+  ContentCategory,
+  Severity,
+  SourceType,
+  SourceStatus,
+  CreateSourceInput,
+  UpdateSourceInput,
+  CreateMonitoredEntityInput,
+  UpdateMonitoredEntityInput,
+} from "@scrapping/shared";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:3000";
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    headers: { "Content-Type": "application/json" },
+    ...init,
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`HTTP ${response.status} en ${path}: ${body}`);
+  }
+  if (response.status === 204) return undefined as T;
+  return response.json();
+}
 
 export interface AlertListItem {
   id: string;
@@ -20,10 +42,40 @@ export interface AlertListItem {
   notifications: { id: string; channel: string; status: string; sentAt: string | null }[];
 }
 
-export async function fetchAlerts(): Promise<AlertListItem[]> {
-  const response = await fetch(`${API_BASE_URL}/alerts`);
-  if (!response.ok) {
-    throw new Error(`No se pudieron cargar las alertas (HTTP ${response.status})`);
-  }
-  return response.json();
+export const fetchAlerts = () => request<AlertListItem[]>("/alerts");
+
+export interface SourceItem {
+  id: string;
+  name: string;
+  type: SourceType;
+  url: string;
+  status: SourceStatus;
+  lastRunAt: string | null;
+  lastPublicationAt: string | null;
+  lastError: string | null;
+  publicationsCount: number;
+  createdAt: string;
 }
+
+export const fetchSources = () => request<SourceItem[]>("/sources");
+export const createSource = (data: CreateSourceInput) =>
+  request<SourceItem>("/sources", { method: "POST", body: JSON.stringify(data) });
+export const updateSource = (id: string, data: UpdateSourceInput) =>
+  request<SourceItem>(`/sources/${id}`, { method: "PATCH", body: JSON.stringify(data) });
+export const deleteSource = (id: string) =>
+  request<{ deleted: boolean }>(`/sources/${id}`, { method: "DELETE" });
+
+export interface MonitoredEntityItem {
+  id: string;
+  name: string;
+  aliases: string[];
+  createdAt: string;
+}
+
+export const fetchEntities = () => request<MonitoredEntityItem[]>("/entities");
+export const createEntity = (data: CreateMonitoredEntityInput) =>
+  request<MonitoredEntityItem>("/entities", { method: "POST", body: JSON.stringify(data) });
+export const updateEntity = (id: string, data: UpdateMonitoredEntityInput) =>
+  request<MonitoredEntityItem>(`/entities/${id}`, { method: "PATCH", body: JSON.stringify(data) });
+export const deleteEntity = (id: string) =>
+  request<{ deleted: boolean }>(`/entities/${id}`, { method: "DELETE" });

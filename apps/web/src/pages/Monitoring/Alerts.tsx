@@ -33,7 +33,7 @@ export default function MonitoringAlerts() {
 
   return (
     <>
-      <PageMeta title="Alertas | Scrapping" description="Alertas generadas por el monitor de publicaciones" />
+      <PageMeta title="Alertas | Alertas Nación" description="Alertas generadas por el monitor de publicaciones" />
       <PageBreadcrumb pageTitle="Alertas" />
       <div className="space-y-6">
         <ComponentCard title="Alertas detectadas">
