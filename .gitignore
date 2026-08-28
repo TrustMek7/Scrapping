@@ -1,46 +1,55 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
 
-# dependencies
-/node_modules
-/.pnp
+node_modules
+dist
+dist-ssr
+*.local
+
+# Env
+.env
+!.env.example
+
+# Prisma
+/prisma/generated
+
+# pnpm
+.pnpm-store
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# PostScope (Next.js + Playwright, vive en apps/postscope/)
+# Sin "/" inicial a propósito: apps/postscope/ no es la raíz del repo.
+.pnp
 .pnp.*
 .yarn/*
 !.yarn/patches
 !.yarn/plugins
 !.yarn/releases
 !.yarn/versions
-
-# testing
-/coverage
-/playwright-report/
-/test-results/
-
-# next.js
-/.next/
-/out/
-
-# production
-/build
-
-# misc
-.DS_Store
+coverage
+playwright-report/
+test-results/
+.next/
+out/
 *.pem
-
-# local Facebook browser profile (contains sensitive session data)
-/.facebook-session/
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# env files (can opt-in for committing if needed)
-.env*
-
-# vercel
+.facebook-session/
+.facebook-debug/
 .vercel
-
-# typescript
 *.tsbuildinfo
 next-env.d.ts

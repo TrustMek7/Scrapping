@@ -1,0 +1,299 @@
+import { useEffect, useState } from "react";
+import PageBreadcrumb from "../../components/common/PageBreadCrumb";
+import ComponentCard from "../../components/common/ComponentCard";
+import PageMeta from "../../components/common/PageMeta";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHeader,
+  TableRow,
+} from "../../components/ui/table";
+import Badge from "../../components/ui/badge/Badge";
+import Button from "../../components/ui/button/Button";
+import Select from "../../components/form/Select";
+import { useToast } from "../../context/ToastContext";
+import {
+  checkAllFacebookSources,
+  checkFacebookSource,
+  fetchAlerts,
+  fetchFacebookSession,
+  fetchSources,
+  loginFacebook,
+  logoutFacebook,
+  type AlertListItem,
+  type FacebookSessionStatus,
+  type SourceItem,
+} from "../../lib/api";
+import type { Severity } from "@scrapping/shared";
+
+const SEVERITY_COLOR: Record<Severity, "error" | "warning" | "info"> = {
+  HIGH: "error",
+  MEDIUM: "warning",
+  LOW: "info",
+};
+
+const SESSION_LABEL: Record<FacebookSessionStatus | "checking" | "error", string> = {
+  checking: "Comprobando...",
+  active: "Activa",
+  required: "No iniciada",
+  expired: "Expirada",
+  error: "No disponible",
+};
+
+export default function MonitoringAlerts() {
+  const toast = useToast();
+  const [alerts, setAlerts] = useState<AlertListItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const [facebookSources, setFacebookSources] = useState<SourceItem[]>([]);
+  const [selectedSourceId, setSelectedSourceId] = useState("");
+  const [sessionStatus, setSessionStatus] = useState<FacebookSessionStatus | "checking" | "error">(
+    "checking",
+  );
+  const [loginPending, setLoginPending] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [checkingAll, setCheckingAll] = useState(false);
+
+  const load = () => {
+    setLoading(true);
+    fetchAlerts()
+      .then(setAlerts)
+      .catch((err: Error) => setError(err.message))
+      .finally(() => setLoading(false));
+  };
+
+  const loadFacebookSession = () => {
+    fetchFacebookSession()
+      .then((res) => setSessionStatus(res.status))
+      .catch(() => setSessionStatus("error"));
+  };
+
+  useEffect(load, []);
+
+  useEffect(() => {
+    loadFacebookSession();
+    fetchSources()
+      .then((sources) => setFacebookSources(sources.filter((s) => s.type === "FACEBOOK" && s.status === "ACTIVE")))
+      .catch(() => undefined);
+  }, []);
+
+  const handleLogin = async () => {
+    setLoginPending(true);
+    try {
+      const res = await loginFacebook();
+      setSessionStatus(res.status);
+      toast.success("Sesión de Facebook activa.");
+    } catch (err) {
+      toast.error((err as Error).message);
+      setSessionStatus("error");
+    } finally {
+      setLoginPending(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      const res = await logoutFacebook();
+      setSessionStatus(res.status);
+      toast.success("Sesión de Facebook cerrada.");
+    } catch (err) {
+      toast.error((err as Error).message);
+    }
+  };
+
+  const handleCheckSource = async () => {
+    if (!selectedSourceId) return;
+    setChecking(true);
+    try {
+      const result = await checkFacebookSource(selectedSourceId);
+      if (result.deduplicated) {
+        toast.success("La última publicación ya se había analizado antes (sin novedades).");
+      } else if (result.analysis?.status === "FAILED") {
+        toast.error("El análisis de IA falló para esta publicación.");
+      } else {
+        const parts = [
+          `Relevante: ${result.analysis?.relevant ? "sí" : "no"}`,
+          `categoría: ${result.analysis?.category ?? "—"}`,
+        ];
+        toast.success(
+          result.alert
+            ? `🔴 Nueva alerta generada (${parts.join(", ")}).`
+            : `Publicación analizada, sin alerta (${parts.join(", ")}).`,
+        );
+      }
+      load();
+    } catch (err) {
+      toast.error((err as Error).message);
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const handleCheckAll = async () => {
+    setCheckingAll(true);
+    try {
+      const results = await checkAllFacebookSources();
+      const newAlerts = results.filter((r) => r.ok && r.alertCreated).length;
+      const noNews = results.filter((r) => r.ok && !r.alertCreated).length;
+      const failed = results.filter((r) => !r.ok).length;
+
+      if (results.length === 0) {
+        toast.error("No hay fuentes de Facebook activas para revisar.");
+      } else {
+        toast.success(
+          `${results.length} fuente(s) revisada(s): ${newAlerts} alerta(s) nueva(s), ${noNews} sin novedades, ${failed} con error.`,
+        );
+      }
+      if (failed > 0) {
+        results
+          .filter((r) => !r.ok)
+          .forEach((r) => toast.error(`${r.sourceName}: ${r.error}`));
+      }
+      load();
+    } catch (err) {
+      toast.error((err as Error).message);
+    } finally {
+      setCheckingAll(false);
+    }
+  };
+
+  return (
+    <>
+      <PageMeta title="Alertas | Alertas Nación" description="Alertas generadas por el monitor de publicaciones" />
+      <PageBreadcrumb pageTitle="Alertas" />
+      <div className="space-y-6">
+        <ComponentCard title="Revisar Facebook">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-sm text-gray-500 dark:text-gray-400">
+              Sesión de Facebook: <strong>{SESSION_LABEL[sessionStatus]}</strong>
+            </span>
+            {sessionStatus === "active" ? (
+              <Button size="sm" variant="outline" onClick={handleLogout}>
+                Cerrar sesión
+              </Button>
+            ) : (
+              <Button size="sm" variant="outline" onClick={handleLogin} disabled={loginPending}>
+                {loginPending ? "Esperando login..." : "Iniciar sesión"}
+              </Button>
+            )}
+          </div>
+
+          {loginPending && (
+            <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+              Se abrió una ventana de Chromium en esta computadora — completá el login ahí manualmente.
+            </p>
+          )}
+
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <div className="w-full sm:w-64">
+              <Select
+                options={facebookSources.map((s) => ({ value: s.id, label: s.name }))}
+                placeholder={facebookSources.length === 0 ? "Sin fuentes de Facebook activas" : "Elegí una fuente..."}
+                onChange={setSelectedSourceId}
+              />
+            </div>
+            <Button
+              size="sm"
+              onClick={handleCheckSource}
+              disabled={checking || checkingAll || sessionStatus !== "active" || !selectedSourceId}
+            >
+              {checking ? "Revisando..." : "Revisar última publicación"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleCheckAll}
+              disabled={checking || checkingAll || sessionStatus !== "active" || facebookSources.length === 0}
+            >
+              {checkingAll ? "Revisando todas..." : `Revisar todas (${facebookSources.length})`}
+            </Button>
+          </div>
+          {facebookSources.length === 0 && (
+            <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+              No hay fuentes de tipo Facebook activas — creá una en{" "}
+              <a href="/monitoreo/fuentes" className="text-brand-500 hover:underline">Fuentes</a>.
+            </p>
+          )}
+        </ComponentCard>
+
+        <ComponentCard title="Alertas detectadas">
+          {loading && <p className="text-gray-500 dark:text-gray-400">Cargando...</p>}
+          {error && (
+            <p className="text-error-500">
+              {error} — ¿está corriendo el backend (<code>pnpm dev:backend</code>)?
+            </p>
+          )}
+          {!loading && !error && alerts.length === 0 && (
+            <p className="text-gray-500 dark:text-gray-400">
+              Todavía no hay alertas. Se crean automáticamente cuando el análisis de una
+              publicación cumple las reglas configuradas en <code>ALERT_CATEGORIES</code> /{" "}
+              <code>ALERT_MIN_CONFIDENCE</code>.
+            </p>
+          )}
+          {!loading && !error && alerts.length > 0 && (
+            <div className="overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-white/[0.05] dark:bg-white/[0.03]">
+              <div className="max-w-full overflow-x-auto">
+                <Table>
+                  <TableHeader className="border-b border-gray-100 dark:border-white/[0.05]">
+                    <TableRow>
+                      <TableCell isHeader className="px-5 py-3 font-medium text-gray-500 text-start text-theme-xs dark:text-gray-400">
+                        Entidad
+                      </TableCell>
+                      <TableCell isHeader className="px-5 py-3 font-medium text-gray-500 text-start text-theme-xs dark:text-gray-400">
+                        Categoría
+                      </TableCell>
+                      <TableCell isHeader className="px-5 py-3 font-medium text-gray-500 text-start text-theme-xs dark:text-gray-400">
+                        Severidad
+                      </TableCell>
+                      <TableCell isHeader className="px-5 py-3 font-medium text-gray-500 text-start text-theme-xs dark:text-gray-400">
+                        Resumen
+                      </TableCell>
+                      <TableCell isHeader className="px-5 py-3 font-medium text-gray-500 text-start text-theme-xs dark:text-gray-400">
+                        Fuente
+                      </TableCell>
+                      <TableCell isHeader className="px-5 py-3 font-medium text-gray-500 text-start text-theme-xs dark:text-gray-400">
+                        Fecha
+                      </TableCell>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody className="divide-y divide-gray-100 dark:divide-white/[0.05]">
+                    {alerts.map((alert) => (
+                      <TableRow key={alert.id}>
+                        <TableCell className="px-5 py-4 text-start font-medium text-gray-800 text-theme-sm dark:text-white/90">
+                          {alert.entity.name}
+                        </TableCell>
+                        <TableCell className="px-4 py-3 text-start text-theme-sm">
+                          <Badge size="sm" color="primary">
+                            {alert.category}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="px-4 py-3 text-start text-theme-sm">
+                          <Badge size="sm" color={SEVERITY_COLOR[alert.severity]}>
+                            {alert.severity}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="px-4 py-3 max-w-md text-gray-500 text-start text-theme-sm dark:text-gray-400">
+                          {alert.summary}
+                        </TableCell>
+                        <TableCell className="px-4 py-3 text-gray-500 text-start text-theme-sm dark:text-gray-400">
+                          <a href={alert.publication.url} target="_blank" rel="noreferrer" className="text-brand-500 hover:underline">
+                            {alert.publication.source.name}
+                          </a>
+                        </TableCell>
+                        <TableCell className="px-4 py-3 text-gray-500 text-start text-theme-sm dark:text-gray-400">
+                          {new Date(alert.createdAt).toLocaleString()}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+          )}
+        </ComponentCard>
+      </div>
+    </>
+  );
+}

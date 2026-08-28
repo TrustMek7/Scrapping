@@ -1,0 +1,22 @@
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: scrapping-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-scrapping}
+      MYSQL_USER: ${MYSQL_USER:-scrapping}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-scrapping}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-scrapping}
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-scrapping}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  mysql_data:
