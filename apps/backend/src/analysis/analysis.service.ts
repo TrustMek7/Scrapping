@@ -5,6 +5,13 @@ import { AnalysisResult, SourceType } from "@scrapping/shared";
 import { PrismaService } from "../prisma/prisma.service";
 import { AI_PROVIDER, AIProvider, AnalysisInput, MonitoredEntityInput } from "./ai-provider.interface";
 
+export interface PublicationImageInput {
+  url: string;
+  alt: string | null;
+  width: number;
+  height: number;
+}
+
 export interface RunAnalysisInput {
   sourceId: string;
   title: string;
@@ -12,6 +19,7 @@ export interface RunAnalysisInput {
   url: string;
   externalId?: string;
   publishedAt?: Date;
+  images?: PublicationImageInput[];
 }
 
 export interface CaptureExternalPostInput {
@@ -56,7 +64,19 @@ export class AnalysisService {
     const existing = await this.prisma.publication.findUnique({ where: { contentHash } });
     if (existing) {
       this.logger.log(`[SCRAPER] publicación duplicada, se omite (contentHash=${contentHash})`);
-      return { publication: existing, analysis: await this.prisma.analysis.findUnique({ where: { publicationId: existing.id } }), alert: null, deduplicated: true };
+
+      // El texto es igual, pero la extracción sí volvió a descargar y cachear la
+      // imagen (el cache anterior pudo haber expirado o perderse en un reinicio) —
+      // sin esto, la publicación se queda apuntando a un link de imagen muerto
+      // para siempre, aunque cada revisión haya guardado una copia fresca.
+      const publication = input.images
+        ? await this.prisma.publication.update({
+            where: { id: existing.id },
+            data: { images: input.images as unknown as object },
+          })
+        : existing;
+
+      return { publication, analysis: await this.prisma.analysis.findUnique({ where: { publicationId: existing.id } }), alert: null, deduplicated: true };
     }
 
     const publication = await this.prisma.publication.create({
@@ -68,6 +88,7 @@ export class AnalysisService {
         url: input.url,
         contentHash,
         publishedAt: input.publishedAt,
+        images: (input.images ?? []) as unknown as object,
       },
     });
 
@@ -149,6 +170,28 @@ export class AnalysisService {
       url: input.url,
       externalId: input.externalId,
     });
+  }
+
+  /** Lista las últimas publicaciones analizadas, tengan o no alerta — registro/historial de revisiones. */
+  async listRecent(limit = 20) {
+    const publications = await this.prisma.publication.findMany({
+      take: limit,
+      orderBy: { createdAt: "desc" },
+      include: { source: { select: { name: true } }, analysis: true },
+    });
+
+    // Publicaciones creadas antes de agregar la columna "images" quedaron con NULL
+    // en vez de "[]" — normalizamos acá para que el frontend siempre reciba un array.
+    return publications.map((publication) => ({
+      ...publication,
+      images: (publication.images as PublicationImageInput[] | null) ?? [],
+    }));
+  }
+
+  /** Borra todo el historial de publicaciones analizadas (y sus análisis/alertas en cascada). */
+  async deleteAllPublications() {
+    const { count } = await this.prisma.publication.deleteMany();
+    return { deleted: count };
   }
 
   private async loadMonitoredEntities(): Promise<MonitoredEntityInput[]> {

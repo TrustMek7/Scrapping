@@ -73,7 +73,7 @@ model Source {
   status            SourceStatus @default(ACTIVE)
   lastRunAt         DateTime?
   lastPublicationAt DateTime?
-  lastError         String?
+  lastError         String?      @db.Text
   publicationsCount Int          @default(0)
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
@@ -98,11 +98,12 @@ model Publication {
   source       Source    @relation(fields: [sourceId], references: [id], onDelete: Cascade)
   externalId   String?
   title        String
-  content      String
+  content      String    @db.Text
   url          String
   canonicalUrl String?
   contentHash  String    @unique
   publishedAt  DateTime?
+  images       Json?
   createdAt    DateTime  @default(now())
 
   entities PublicationEntity[]
@@ -133,8 +134,8 @@ model Analysis {
   category      ContentCategory?
   severity      Severity?
   confidence    Float?
-  summary       String?
-  reason        String?
+  summary       String?          @db.Text
+  reason        String?          @db.Text
   claims        Json?
   rawOutput     Json?
   error         String?
@@ -156,7 +157,7 @@ model Alert {
   category      ContentCategory
   severity      Severity
   confidence    Float
-  summary       String
+  summary       String   @db.Text
   createdAt     DateTime @default(now())
 
   notifications Notification[]

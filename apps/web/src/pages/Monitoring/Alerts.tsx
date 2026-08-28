@@ -12,17 +12,22 @@ import {
 import Badge from "../../components/ui/badge/Badge";
 import Button from "../../components/ui/button/Button";
 import Select from "../../components/form/Select";
+import { Modal } from "../../components/ui/modal";
+import ConfirmDialog from "../../components/common/ConfirmDialog";
 import { useToast } from "../../context/ToastContext";
 import {
   checkAllFacebookSources,
   checkFacebookSource,
+  deleteAllPublications,
   fetchAlerts,
   fetchFacebookSession,
+  fetchRecentPublications,
   fetchSources,
   loginFacebook,
   logoutFacebook,
   type AlertListItem,
   type FacebookSessionStatus,
+  type RecentPublicationItem,
   type SourceItem,
 } from "../../lib/api";
 import type { Severity } from "@scrapping/shared";
@@ -47,6 +52,10 @@ export default function MonitoringAlerts() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const [recentPublications, setRecentPublications] = useState<RecentPublicationItem[]>([]);
+  const [imagesModalPub, setImagesModalPub] = useState<RecentPublicationItem | null>(null);
+  const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
+
   const [facebookSources, setFacebookSources] = useState<SourceItem[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState("");
   const [sessionStatus, setSessionStatus] = useState<FacebookSessionStatus | "checking" | "error">(
@@ -70,7 +79,14 @@ export default function MonitoringAlerts() {
       .catch(() => setSessionStatus("error"));
   };
 
+  const loadRecentPublications = () => {
+    fetchRecentPublications()
+      .then(setRecentPublications)
+      .catch(() => undefined);
+  };
+
   useEffect(load, []);
+  useEffect(loadRecentPublications, []);
 
   useEffect(() => {
     loadFacebookSession();
@@ -124,6 +140,7 @@ export default function MonitoringAlerts() {
         );
       }
       load();
+      loadRecentPublications();
     } catch (err) {
       toast.error((err as Error).message);
     } finally {
@@ -152,10 +169,24 @@ export default function MonitoringAlerts() {
           .forEach((r) => toast.error(`${r.sourceName}: ${r.error}`));
       }
       load();
+      loadRecentPublications();
     } catch (err) {
       toast.error((err as Error).message);
     } finally {
       setCheckingAll(false);
+    }
+  };
+
+  const handleDeleteAllPublications = async () => {
+    try {
+      const { deleted } = await deleteAllPublications();
+      toast.success(`${deleted} registro(s) eliminado(s).`);
+      setConfirmDeleteAll(false);
+      load();
+      loadRecentPublications();
+    } catch (err) {
+      setConfirmDeleteAll(false);
+      toast.error((err as Error).message);
     }
   };
 
@@ -293,7 +324,130 @@ export default function MonitoringAlerts() {
             </div>
           )}
         </ComponentCard>
+
+        <ComponentCard title="Historial de publicaciones revisadas">
+          <div className="flex justify-end">
+            <Button
+              size="sm"
+              variant="outline"
+              className="!text-error-500 !border-error-500 hover:!bg-error-50"
+              onClick={() => setConfirmDeleteAll(true)}
+              disabled={recentPublications.length === 0}
+            >
+              Borrar todos los registros
+            </Button>
+          </div>
+
+          {recentPublications.length === 0 ? (
+            <p className="mt-4 text-gray-500 dark:text-gray-400">
+              Todavía no se revisó ninguna publicación.
+            </p>
+          ) : (
+            <div className="mt-4 overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-white/[0.05] dark:bg-white/[0.03]">
+              <div className="max-w-full overflow-x-auto">
+                <Table>
+                  <TableHeader className="border-b border-gray-100 dark:border-white/[0.05]">
+                    <TableRow>
+                      <TableCell isHeader className="px-5 py-3 font-medium text-gray-500 text-start text-theme-xs dark:text-gray-400">
+                        Fuente
+                      </TableCell>
+                      <TableCell isHeader className="px-5 py-3 font-medium text-gray-500 text-start text-theme-xs dark:text-gray-400">
+                        Contenido
+                      </TableCell>
+                      <TableCell isHeader className="px-5 py-3 font-medium text-gray-500 text-start text-theme-xs dark:text-gray-400">
+                        Link
+                      </TableCell>
+                      <TableCell isHeader className="px-5 py-3 font-medium text-gray-500 text-start text-theme-xs dark:text-gray-400">
+                        Resultado IA
+                      </TableCell>
+                      <TableCell isHeader className="px-5 py-3 font-medium text-gray-500 text-start text-theme-xs dark:text-gray-400">
+                        Fecha
+                      </TableCell>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody className="divide-y divide-gray-100 dark:divide-white/[0.05]">
+                    {recentPublications.map((pub) => (
+                      <TableRow key={pub.id}>
+                        <TableCell className="px-5 py-4 text-start font-medium text-gray-800 text-theme-sm dark:text-white/90">
+                          {pub.source.name}
+                        </TableCell>
+                        <TableCell className="px-4 py-3 max-w-md text-gray-500 text-start text-theme-sm dark:text-gray-400">
+                          {pub.content.slice(0, 140)}
+                          {pub.content.length > 140 ? "…" : ""}
+                          {pub.images.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => setImagesModalPub(pub)}
+                              className="mt-1 block text-xs text-brand-500 hover:underline"
+                            >
+                              🖼️ Ver {pub.images.length} imagen{pub.images.length > 1 ? "es" : ""}
+                            </button>
+                          )}
+                        </TableCell>
+                        <TableCell className="px-4 py-3 text-start text-theme-sm">
+                          <a href={pub.url} target="_blank" rel="noreferrer" className="text-brand-500 hover:underline">
+                            Ver publicación ↗
+                          </a>
+                        </TableCell>
+                        <TableCell className="px-4 py-3 text-start text-theme-sm">
+                          {pub.analysis?.status === "FAILED" ? (
+                            <Badge size="sm" color="error">Falló: {pub.analysis.error}</Badge>
+                          ) : pub.analysis?.relevant ? (
+                            <Badge size="sm" color="error">
+                              Relevante · {pub.analysis.category} · {pub.analysis.severity}
+                            </Badge>
+                          ) : (
+                            <Badge size="sm" color="info">No relevante</Badge>
+                          )}
+                          {pub.analysis?.summary && (
+                            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{pub.analysis.summary}</p>
+                          )}
+                        </TableCell>
+                        <TableCell className="px-4 py-3 text-gray-500 text-start text-theme-sm dark:text-gray-400">
+                          {new Date(pub.createdAt).toLocaleString()}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+          )}
+        </ComponentCard>
       </div>
+
+      <ConfirmDialog
+        isOpen={confirmDeleteAll}
+        title="Borrar todos los registros"
+        message="¿Borrar todo el historial de publicaciones revisadas? Esto también elimina las alertas generadas a partir de ellas. No se puede deshacer."
+        confirmLabel="Borrar todo"
+        onConfirm={handleDeleteAllPublications}
+        onCancel={() => setConfirmDeleteAll(false)}
+      />
+
+      <Modal
+        isOpen={imagesModalPub !== null}
+        onClose={() => setImagesModalPub(null)}
+        className="max-w-2xl p-6"
+      >
+        <h4 className="mb-1 text-lg font-semibold text-gray-800 dark:text-white/90">
+          Imágenes adjuntas
+        </h4>
+        <p className="mb-4 text-sm text-gray-500 dark:text-gray-400">
+          {imagesModalPub?.source.name}
+        </p>
+        <div className="grid max-h-[70vh] grid-cols-1 gap-4 overflow-y-auto sm:grid-cols-2">
+          {imagesModalPub?.images.map((image, index) => (
+            <a key={index} href={image.url} target="_blank" rel="noreferrer">
+              <img
+                src={image.url}
+                alt={image.alt ?? ""}
+                className="w-full rounded-lg border border-gray-200 object-cover dark:border-white/[0.05]"
+              />
+            </a>
+          ))}
+        </div>
+      </Modal>
     </>
   );
 }

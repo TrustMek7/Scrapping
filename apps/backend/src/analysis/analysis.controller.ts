@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Post } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Delete, Get, Post, Query } from "@nestjs/common";
 import { z } from "zod";
 import { SourceTypeSchema } from "@scrapping/shared";
 import { AnalysisService } from "./analysis.service";
@@ -32,6 +32,21 @@ const captureSchema = z.object({
 @Controller("analysis")
 export class AnalysisController {
   constructor(private readonly analysisService: AnalysisService) {}
+
+  /** Historial de publicaciones revisadas, tengan o no alerta. */
+  @Get()
+  async listRecent(@Query("limit") limit?: string) {
+    const parsedLimit = Number(limit);
+    return this.analysisService.listRecent(
+      Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : undefined,
+    );
+  }
+
+  /** Borra todo el historial de publicaciones revisadas (y sus análisis/alertas). */
+  @Delete()
+  async deleteAll() {
+    return this.analysisService.deleteAllPublications();
+  }
 
   /** Prueba el prompt/modelo contra las entidades ya registradas, sin guardar nada. */
   @Post("preview")

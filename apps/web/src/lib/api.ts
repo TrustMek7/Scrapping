@@ -115,3 +115,29 @@ export interface CheckAllSourcesResultItem {
 
 export const checkAllFacebookSources = () =>
   request<CheckAllSourcesResultItem[]>("/facebook/sources/check-all", { method: "POST" });
+
+/** Temporal: para verificar el pipeline de análisis aunque no genere alerta. */
+export interface RecentPublicationItem {
+  id: string;
+  title: string;
+  content: string;
+  url: string;
+  createdAt: string;
+  source: { name: string };
+  images: { url: string; alt: string | null; width: number; height: number }[];
+  analysis: {
+    status: "PENDING" | "COMPLETED" | "FAILED";
+    relevant: boolean | null;
+    category: ContentCategory | null;
+    severity: Severity | null;
+    confidence: number | null;
+    summary: string | null;
+    error: string | null;
+  } | null;
+}
+
+export const fetchRecentPublications = () =>
+  request<RecentPublicationItem[]>("/analysis?limit=20");
+
+export const deleteAllPublications = () =>
+  request<{ deleted: number }>("/analysis", { method: "DELETE" });

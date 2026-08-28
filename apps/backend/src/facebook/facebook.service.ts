@@ -69,6 +69,7 @@ export class FacebookService {
         title: `Publicación de ${post.author.name ?? source.name}`,
         content: post.text,
         url: post.url,
+        images: post.images,
       });
 
       await this.prisma.source.update({
@@ -85,10 +86,16 @@ export class FacebookService {
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Error desconocido al revisar la fuente.";
-      await this.prisma.source.update({
-        where: { id: source.id },
-        data: { lastRunAt: new Date(), lastError: message },
-      });
+      this.logger.error(`[FACEBOOK] falló la revisión de "${source.name}": ${message}`);
+
+      // Si esta actualización también falla (ej. columna muy chica) no queremos
+      // perder el error original — que es el que realmente le interesa al usuario.
+      await this.prisma.source
+        .update({ where: { id: source.id }, data: { lastRunAt: new Date(), lastError: message } })
+        .catch((updateError) =>
+          this.logger.error(`[FACEBOOK] no se pudo guardar lastError: ${(updateError as Error).message}`),
+        );
+
       throw error;
     }
   }

@@ -11,22 +11,36 @@ export const FACEBOOK_SESSION_DIR = path.join(
 );
 
 let browserInUse = false;
+let lockAcquiredAt: number | null = null;
+
+// El login manual puede tardar hasta LOGIN_TIMEOUT_MS (10 min, ver session.ts) sosteniendo
+// el candado legítimamente. Si sigue trabado más que eso, es que algo se colgó (ej. el
+// proceso se reinició a mitad de una operación) — mejor auto-liberarlo que exigir un
+// reinicio manual del backend cada vez que pasa.
+const STALE_LOCK_MS = 11 * 60 * 1000;
 
 export async function runWithBrowserLock<T>(operation: () => Promise<T>) {
-  // Un solo proceso local y una sola operación de navegador a la vez alcanza para este piloto.
   if (browserInUse) {
-    throw new FacebookError(
-      "BROWSER_ERROR",
-      "El navegador está ocupado. Espera a que termine la operación actual.",
-      409,
+    const heldForMs = lockAcquiredAt ? Date.now() - lockAcquiredAt : Infinity;
+    if (heldForMs < STALE_LOCK_MS) {
+      throw new FacebookError(
+        "BROWSER_ERROR",
+        "El navegador está ocupado. Espera a que termine la operación actual.",
+        409,
+      );
+    }
+    console.warn(
+      `[Facebook] El candado del navegador llevaba trabado ${Math.round(heldForMs / 1000)}s — se libera solo y se reintenta.`,
     );
   }
 
   browserInUse = true;
+  lockAcquiredAt = Date.now();
   try {
     return await operation();
   } finally {
     browserInUse = false;
+    lockAcquiredAt = null;
   }
 }
 

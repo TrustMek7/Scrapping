@@ -23,16 +23,62 @@ async function dumpDebugHtml(post: Locator, label: string) {
   }
 }
 
+/** Igual que dumpDebugHtml pero para cuando no se encontró NINGÚN post — vuelca la página entera + una captura. */
+export async function dumpDebugPage(page: Page, label: string) {
+  try {
+    fs.mkdirSync(DEBUG_DIR, { recursive: true });
+    const stamp = Date.now();
+    const html = await page.content();
+    fs.writeFileSync(path.join(DEBUG_DIR, `${label}-${stamp}.html`), html, "utf8");
+    await page.screenshot({ path: path.join(DEBUG_DIR, `${label}-${stamp}.png`), fullPage: false });
+    console.warn(`[Facebook] Volcado de página completa para diagnóstico guardado con el sufijo: ${label}-${stamp}`);
+  } catch (dumpError) {
+    console.warn("[Facebook] No se pudo guardar el volcado de página de diagnóstico", dumpError);
+  }
+}
+
 function cleanText(value: string | null) {
   return value?.replace(/\s+/g, " ").trim() || null;
 }
 
-async function extractMessageText(post: Locator) {
+/** Saca el id numérico de un video de su URL, ya sea /videos/{id}/ o ?v={id} (formato /watch/live/). */
+function extractVideoId(href: string): string | null {
+  try {
+    const url = new URL(href, "https://www.facebook.com");
+    return url.searchParams.get("v") ?? url.pathname.match(/\/videos\/(\d+)/)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function extractMessageText(post: Locator, page: Page) {
   const message = post
     .locator('[data-ad-preview="message"], [data-ad-comet-preview="message"]')
     .first();
 
   if (!(await message.isVisible().catch(() => false))) {
+    // Transmisiones en vivo (y algunos videos) no ponen el texto en el bloque de
+    // mensaje habitual: el caption vive como texto clickeable dentro del propio
+    // link al video — confirmado con evidencia real:
+    //   <a role="link" href=".../videos/123/"><span>el texto acá</span></a>
+    // Pero [role="main"] (el contenedor en este modo relajado) también puede
+    // tener un video SUGERIDO/relacionado con su propio link y su propio
+    // "caption" — confirmado con otro caso real: se coló el texto de un video
+    // completamente ajeno de otra página. Por eso exigimos que el link
+    // encontrado sea del MISMO video al que navegamos, no cualquier /videos/.
+    const currentVideoId = extractVideoId(page.url());
+    const videoCaptionLinks = post.locator('a[role="link"][href*="/videos/"]');
+    const count = await videoCaptionLinks.count().catch(() => 0);
+
+    for (let i = 0; i < count; i++) {
+      const link = videoCaptionLinks.nth(i);
+      const href = await link.getAttribute("href").catch(() => null);
+      if (currentVideoId && extractVideoId(href ?? "") !== currentVideoId) continue;
+
+      const cleaned = cleanText(await link.textContent().catch(() => null));
+      if (cleaned && cleaned.length > 5) return cleaned;
+    }
+
     return null;
   }
 
@@ -69,11 +115,21 @@ async function extractMessageText(post: Locator) {
 }
 
 async function extractImages(page: Page, post: Locator) {
-  const candidates = await post.locator("img").evaluateAll((nodes) => {
+  // Ojo: el contenedor "post" puede ser él mismo un [role="article"] (caso feed de
+  // página) o un [role="dialog"] que contiene comentarios anidados con
+  // [role="article"] (caso post puntual). En ambos casos queremos excluir imágenes
+  // de COMENTARIOS anidados, pero no las del post mismo — por eso comparamos contra
+  // el propio elemento raíz en vez de asumir que cualquier ancestro role=article
+  // es siempre un comentario.
+  const candidates = await post.evaluate((rootEl) => {
+    const nodes = Array.from(rootEl.querySelectorAll("img"));
     const seen = new Set<string>();
 
     return nodes.flatMap((node) => {
-      if (!(node instanceof HTMLImageElement) || node.closest('[role="article"]')) return [];
+      const nearestArticle = node.closest('[role="article"]');
+      if (!(node instanceof HTMLImageElement) || (nearestArticle && nearestArticle !== rootEl)) {
+        return [];
+      }
 
       const { width, height } = node.getBoundingClientRect();
       const sourceUrl = node.currentSrc || node.src;
@@ -135,8 +191,23 @@ async function extractImages(page: Page, post: Locator) {
   return images;
 }
 
-async function extractFromContainer(page: Page, post: Locator, fallbackUrl: string): Promise<FacebookPost> {
+async function extractFromContainer(
+  page: Page,
+  post: Locator,
+  fallbackUrl: string,
+  requireAuthor = true,
+  includeImages = true,
+): Promise<FacebookPost> {
   console.info("[Facebook] Extracting author...");
+
+  // Estrategia principal: el aria-label del propio contenedor suele traer el nombre
+  // directo (ej. "Comentario de Fulano hace 4 horas") — más confiable que buscar
+  // en <h1-3>/<strong>, que Facebook ya no usa para el nombre del autor.
+  const ariaLabel = await post.getAttribute("aria-label").catch(() => null);
+  const ariaAuthor =
+    ariaLabel?.match(/^(?:Comentario de|Comment by|Publicaci[oó]n de|Post by)\s+(.+?)(?:\s+hace\s|$)/i)?.[1] ??
+    null;
+
   const linkedAuthor = cleanText(
     await post
       .locator("h3 a, h2 a, strong a")
@@ -150,8 +221,15 @@ async function extractFromContainer(page: Page, post: Locator, fallbackUrl: stri
   );
   const titleAuthor = dialogTitle?.match(/^(?:Publicación de|Post by)\s+(.+)$/i)?.[1] ?? null;
   // Último recurso: cualquier encabezado con texto, aunque no sea un link
-  // (posts de video/reel a veces no envuelven el nombre en <a>).
-  const looseHeading = cleanText(
+  // (posts de video/reel a veces no envuelven el nombre en <a>). Riesgoso en
+  // el modo relajado ([role="main"] entero): confirmado con evidencia real
+  // que agarró "Video", el título de una sección de videos sugeridos, no un
+  // nombre de autor — filtramos esas etiquetas genéricas de la UI.
+  const GENERIC_UI_LABELS = new Set([
+    "video", "videos", "reels", "fotos", "publicaciones",
+    "información", "informacion", "seguidores", "todo", "más", "mas",
+  ]);
+  const looseHeadingRaw = cleanText(
     await post
       .locator("h1, h2, h3, strong")
       .filter({ hasText: /\S/ })
@@ -159,9 +237,11 @@ async function extractFromContainer(page: Page, post: Locator, fallbackUrl: stri
       .textContent()
       .catch(() => null),
   );
-  const author = linkedAuthor ?? titleAuthor ?? looseHeading;
+  const looseHeading =
+    looseHeadingRaw && !GENERIC_UI_LABELS.has(looseHeadingRaw.toLowerCase()) ? looseHeadingRaw : null;
+  const author = ariaAuthor ?? linkedAuthor ?? titleAuthor ?? looseHeading;
 
-  if (!author) {
+  if (!author && requireAuthor) {
     await dumpDebugHtml(post, "no-author");
     throw new FacebookError(
       "EXTRACTION_FAILED",
@@ -171,9 +251,15 @@ async function extractFromContainer(page: Page, post: Locator, fallbackUrl: stri
   }
 
   console.info("[Facebook] Extracting text...");
-  const text = await extractMessageText(post);
+  const text = await extractMessageText(post, page);
+
+  // En el modo relajado (videos/en vivo sin diálogo aislado) el contenedor es
+  // [role="main"] entero — ahí también viven anuncios y contenido sugerido de
+  // Facebook (confirmado con evidencia real: se coló una imagen publicitaria
+  // de una plataforma de trading). El objetivo para videos siempre fue "solo
+  // texto, sin el contenido visual", así que directamente no buscamos imágenes.
   console.info("[Facebook] Extracting images...");
-  const images = await extractImages(page, post);
+  const images = includeImages ? await extractImages(page, post) : [];
 
   // Intenta encontrar el permalink real de la publicación (el link del timestamp);
   // si no aparece, usamos la URL de la página como mejor esfuerzo.
@@ -194,10 +280,24 @@ async function extractFromContainer(page: Page, post: Locator, fallbackUrl: stri
 
 export async function extractFacebookPost(page: Page): Promise<FacebookPost> {
   // Los permalinks de Facebook ubican el post objetivo en un diálogo; los comentarios usan role=article.
-  const post = page.locator('[role="dialog"]:visible').first();
+  const dialog = page.locator('[role="dialog"]:visible').first();
 
   try {
-    await post.waitFor({ state: "visible", timeout: 15_000 });
+    await dialog.waitFor({ state: "visible", timeout: 15_000 });
+    return await extractFromContainer(page, dialog, page.url());
+  } catch (error) {
+    if (error instanceof FacebookError) throw error;
+    // No es un timeout esperable: dejamos que se propague en vez de intentar el fallback.
+  }
+
+  // Los videos/reels no siempre se abren en un diálogo — a veces es una página
+  // completa de reproductor sin ese role. En ese caso no tratamos de leer el
+  // video en sí (no hay OCR/transcripción todavía): buscamos el texto/caption
+  // directamente en el contenedor principal y seguimos sin exigir autor, para
+  // no fallar del todo cuando lo único que interesa es el texto.
+  const main = page.locator('[role="main"]').first();
+  try {
+    await main.waitFor({ state: "visible", timeout: 10_000 });
   } catch {
     throw new FacebookError(
       "EXTRACTION_FAILED",
@@ -206,59 +306,5 @@ export async function extractFacebookPost(page: Page): Promise<FacebookPost> {
     );
   }
 
-  return extractFromContainer(page, post, page.url());
-}
-
-// Contenedores donde Facebook puede renderizar el timeline de una página — probamos
-// varios porque la estructura exacta varía (y cambia con el tiempo). El de "role=feed"
-// es el más común, pero no el único que se vio en uso real.
-const FEED_CONTAINER_SELECTORS = [
-  '[role="feed"]',
-  'div[data-pagelet^="ProfileTimeline"]',
-  'div[data-pagelet^="ProfileAppSection"]',
-  'div[data-pagelet="page"]',
-];
-
-/**
- * Best-effort: extrae la publicación más reciente visible en el timeline de una
- * página (no un permalink puntual). Es menos predecible que la vista de un post —
- * carga diferida, contenido mezclado, estructura que puede cambiar. Prueba varios
- * selectores de contenedor y, si ninguno aparece, busca cualquier [role="article"]
- * visible en toda la página como último recurso.
- */
-export async function extractLatestFeedPost(page: Page): Promise<FacebookPost> {
-  let firstPost: Locator | null = null;
-
-  for (const selector of FEED_CONTAINER_SELECTORS) {
-    const container = page.locator(selector).first();
-    const article = container.locator('[role="article"]').first();
-
-    try {
-      await article.waitFor({ state: "visible", timeout: 8_000 });
-      firstPost = article;
-      break;
-    } catch {
-      continue;
-    }
-  }
-
-  if (!firstPost) {
-    console.warn(
-      "[Facebook] Ningún contenedor de feed conocido funcionó, probando [role=article] suelto en toda la página",
-    );
-    const anyArticle = page.locator('[role="article"]').first();
-    try {
-      await anyArticle.waitFor({ state: "visible", timeout: 10_000 });
-      firstPost = anyArticle;
-    } catch {
-      throw new FacebookError(
-        "EXTRACTION_FAILED",
-        "No se encontró ninguna publicación en esta página.",
-        422,
-      );
-    }
-  }
-
-  await firstPost.scrollIntoViewIfNeeded();
-  return extractFromContainer(page, firstPost, page.url());
+  return extractFromContainer(page, main, page.url(), false, false);
 }

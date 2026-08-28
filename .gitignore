@@ -50,6 +50,7 @@ out/
 *.pem
 .facebook-session/
 .facebook-debug/
+.facebook-images/
 .vercel
 *.tsbuildinfo
 next-env.d.ts

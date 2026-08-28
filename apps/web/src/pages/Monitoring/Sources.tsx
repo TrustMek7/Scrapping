@@ -170,6 +170,9 @@ export default function Sources() {
                         Tipo
                       </TableCell>
                       <TableCell isHeader className="px-4 py-3 font-medium text-gray-500 text-start text-theme-xs dark:text-gray-400">
+                        Link
+                      </TableCell>
+                      <TableCell isHeader className="px-4 py-3 font-medium text-gray-500 text-start text-theme-xs dark:text-gray-400">
                         Estado
                       </TableCell>
                       <TableCell isHeader className="px-4 py-3 font-medium text-gray-500 text-start text-theme-xs dark:text-gray-400">
@@ -187,12 +190,15 @@ export default function Sources() {
                     {sources.map((source) => (
                       <TableRow key={source.id}>
                         <TableCell className="px-5 py-4 text-start font-medium text-gray-800 text-theme-sm dark:text-white/90">
-                          <a href={source.url} target="_blank" rel="noreferrer" className="hover:underline">
-                            {source.name}
-                          </a>
+                          {source.name}
                         </TableCell>
                         <TableCell className="px-4 py-3 text-gray-500 text-start text-theme-sm dark:text-gray-400">
                           {source.type}
+                        </TableCell>
+                        <TableCell className="px-4 py-3 text-start text-theme-sm">
+                          <a href={source.url} target="_blank" rel="noreferrer" className="text-brand-500 hover:underline">
+                            Ver página ↗
+                          </a>
                         </TableCell>
                         <TableCell className="px-4 py-3 text-start text-theme-sm">
                           <Badge size="sm" color={STATUS_COLOR[source.status]}>
