@@ -65,6 +65,35 @@ export const updateSource = (id: string, data: UpdateSourceInput) =>
 export const deleteSource = (id: string) =>
   request<{ deleted: boolean }>(`/sources/${id}`, { method: "DELETE" });
 
+export interface BulkFacebookSourceImportResult {
+  created: number;
+  skipped: number;
+  errors: string[];
+  message: string;
+}
+
+export const importFacebookSourcesFromExcel = async (file: File) => {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const response = await fetch(`${API_BASE_URL}/sources/import/excel`, {
+    method: "POST",
+    body: formData,
+  });
+
+  const contentType = response.headers.get("content-type") ?? "";
+  const payload = contentType.includes("application/json")
+    ? await response.json()
+    : await response.text();
+
+  if (!response.ok) {
+    const message = typeof payload === "string" ? payload : payload?.message ?? "Error al importar fuentes.";
+    throw new Error(message);
+  }
+
+  return payload as BulkFacebookSourceImportResult;
+};
+
 export interface MonitoredEntityItem {
   id: string;
   name: string;

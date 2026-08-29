@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import PageBreadcrumb from "../../components/common/PageBreadCrumb";
 import ComponentCard from "../../components/common/ComponentCard";
 import PageMeta from "../../components/common/PageMeta";
@@ -21,6 +21,7 @@ import {
   createSource,
   deleteSource,
   fetchSources,
+  importFacebookSourcesFromExcel,
   updateSource,
   type SourceItem,
 } from "../../lib/api";
@@ -64,6 +65,8 @@ export default function Sources() {
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<SourceItem | null>(null);
+  const [importing, setImporting] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const toast = useToast();
 
   const load = () => {
@@ -134,17 +137,55 @@ export default function Sources() {
     }
   };
 
+  const handleImportExcel = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setImporting(true);
+    try {
+      const result = await importFacebookSourcesFromExcel(file);
+
+      if (result.errors.length > 0) {
+        toast.error(`Importación parcial: ${result.errors[0]}`);
+      }
+
+      toast.success(result.message);
+      load();
+    } catch (err) {
+      toast.error((err as Error).message);
+    } finally {
+      setImporting(false);
+      event.target.value = "";
+    }
+  };
+
   return (
     <>
       <PageMeta title="Fuentes | Alertas Nación" description="Fuentes públicas configuradas para el monitor" />
       <PageBreadcrumb pageTitle="Fuentes" />
       <div className="space-y-6">
         <ComponentCard title="Fuentes registradas">
-          <div className="flex justify-end">
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button size="sm" variant="outline" onClick={() => fileInputRef.current?.click()} disabled={importing}>
+              {importing ? "Importando..." : "Importar Excel"}
+            </Button>
             <Button size="sm" onClick={openCreate}>
               Nueva fuente
             </Button>
           </div>
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xls,.csv"
+            className="hidden"
+            onChange={handleImportExcel}
+          />
+
+          <p className="mt-3 text-sm text-gray-500 dark:text-gray-400">
+            El Excel debe tener 2 columnas: la primera es el nombre de la fuente y la segunda el link.
+            Se ignora la primera fila y se cuenta desde la fila 2. Todas las fuentes importadas serán de tipo Facebook.
+          </p>
 
           {loading && <p className="text-gray-500 dark:text-gray-400">Cargando...</p>}
           {error && (
