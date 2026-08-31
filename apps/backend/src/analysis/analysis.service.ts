@@ -96,7 +96,7 @@ export class AnalysisService {
     const monitoredEntities = monitoredEntitiesRaw.map((e) => ({
       id: e.id,
       name: e.name,
-      aliases: (e.aliases as string[]) ?? [],
+      aliases: e.aliases,
     }));
 
     let result: AnalysisResult;
@@ -196,10 +196,7 @@ export class AnalysisService {
 
   private async loadMonitoredEntities(): Promise<MonitoredEntityInput[]> {
     const entities = await this.prisma.monitoredEntity.findMany();
-    return entities.map((e: { name: string; aliases: unknown }) => ({
-      name: e.name,
-      aliases: (e.aliases as string[]) ?? [],
-    }));
+    return entities.map((e) => ({ name: e.name, aliases: e.aliases }));
   }
 
   private async linkMatchedEntities(

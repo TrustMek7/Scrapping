@@ -1,22 +1,21 @@
 services:
-  mysql:
-    image: mysql:8.4
-    container_name: scrapping-mysql
+  postgres:
+    image: postgres:16
+    container_name: scrapping-postgres
     restart: unless-stopped
     environment:
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-scrapping}
-      MYSQL_USER: ${MYSQL_USER:-scrapping}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-scrapping}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-scrapping}
+      POSTGRES_DB: ${POSTGRES_DB:-scrapping}
+      POSTGRES_USER: ${POSTGRES_USER:-scrapping}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-scrapping}
     ports:
-      - "${MYSQL_PORT:-3306}:3306"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - mysql_data:/var/lib/mysql
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-scrapping}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-scrapping} -d ${POSTGRES_DB:-scrapping}"]
       interval: 5s
       timeout: 5s
       retries: 10
 
 volumes:
-  mysql_data:
+  postgres_data:

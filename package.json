@@ -11,7 +11,7 @@
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio",
-    "docker:db:up": "docker compose up -d mysql",
+    "docker:db:up": "docker compose up -d postgres",
     "docker:db:down": "docker compose down"
   },
   "dependencies": {

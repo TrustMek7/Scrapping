@@ -46,7 +46,7 @@ Scrapping/
 │   └── shared/         Tipos compartidos (analysis.ts, source.ts, entity.ts)
 ├── prisma/
 │   └── schema.prisma   Modelos + migraciones
-├── docker-compose.yml  Un único servicio: mysql
+├── docker-compose.yml  Un único servicio: postgres
 ├── .env / .env.example
 └── pnpm-workspace.yaml
 ```
@@ -63,7 +63,7 @@ resto del workspace. Se corre por separado: `cd apps/postscope && npm run dev`. 
   repo). El paquete se llama `web` (no `tailadmin-react`) para que los filtros de pnpm
   (`pnpm --filter web ...`) funcionen.
 - **apps/backend** expone por ahora un único endpoint `GET /health` que además verifica la
-  conexión a MySQL vía `PrismaService` (`apps/backend/src/prisma/`). `PrismaModule` es
+  conexión a Postgres vía `PrismaService` (`apps/backend/src/prisma/`). `PrismaModule` es
   `@Global()`.
 - **packages/shared** exporta tipos (no lógica): `ContentCategory`, `Severity`, `ClaimType`,
   `AnalysisResult`, `SourceType`, `SourceStatus`. Se compila a `dist/` (`tsc`) — tanto backend
@@ -76,34 +76,30 @@ resto del workspace. Se corre por separado: `cd apps/postscope && npm run dev`. 
 
 ## Base de datos
 
-**MySQL** (no PostgreSQL — se migró el 2026-08-28; el skill original de construcción pedía
-PostgreSQL explícitamente, esto es una decisión posterior del usuario, no un error de lectura).
-Corre **solo en Docker** (`docker-compose.yml`, servicio `mysql`, imagen `mysql:8.4`, volumen
-persistente `mysql_data`). El resto del stack (backend, frontend, scraper, IA) corre nativo con
-pnpm — no hay Dockerfile para la app.
+**PostgreSQL** (de nuevo — ver "Historial: ida y vuelta MySQL↔Postgres" más abajo para el porqué
+del segundo cambio). En local corre **solo en Docker** (`docker-compose.yml`, servicio
+`postgres`, imagen `postgres:16`, volumen persistente `postgres_data`, usuario/base `scrapping`).
+El resto del stack (backend, frontend, scraper, IA) corre nativo con pnpm — no hay Dockerfile
+para la app. En producción/despliegue, la base vive en **Supabase** (Postgres gestionado, plan
+gratuito) — ver `DATABASE_URL` en el `.env` de ese entorno.
 
-**`DATABASE_URL` usa el usuario `root`, no un usuario dedicado.** El usuario de aplicación
-(`scrapping`, creado vía `MYSQL_USER`/`MYSQL_PASSWORD`) solo tiene privilegios sobre la base
-`scrapping`, y Prisma Migrate necesita crear una "shadow database" temporal para calcular
-diffs — eso requiere `CREATE DATABASE`, que ese usuario no tiene. Usar `root` evita tener que
-gestionar grants a mano; es aceptable porque es una base de desarrollo 100% local, sin
-exposición externa.
+**Puerto 5433 en el host, no el 5432 default de Postgres.** Esta máquina de desarrollo tiene una
+instalación **nativa de PostgreSQL en Windows** (proceso `postgres.exe` corriendo como servicio)
+que ya ocupa el 5432 — las conexiones a `localhost:5432` caían silenciosamente en esa instancia
+nativa (con credenciales completamente distintas) en vez del contenedor Docker, dando errores de
+autenticación que parecían de credenciales mal escritas y en realidad eran de puerto compartido.
+Si migras a otra máquina, comprobá el 5433 igual (`netstat`/`Get-NetTCPConnection` en Windows)
+antes de asumir que está libre.
 
-**Puerto 3306** (el default de MySQL) — se verificó que estaba libre en la máquina de
-desarrollo antes de usarlo. Si migras a otra máquina, comprobalo igual que se hizo con el 5432
-de Postgres antes (`netstat`/`Get-NetTCPConnection` en Windows) — XAMPP/WAMP suelen ocupar el
-3306 en Windows.
-
-**`MonitoredEntity.aliases` es `Json`, no un array nativo.** MySQL (a diferencia de Postgres)
-no soporta columnas de tipo array; el campo sigue guardando un array de strings en runtime
-(`["alias1", "alias2"]`), pero Prisma lo tipa como `Prisma.JsonValue` en TypeScript. Cualquier
-código que lea `aliases` necesita castear explícitamente a `string[]` (ver
-`analysis.service.ts`: se normaliza una sola vez apenas se hace el `findMany()`, y de ahí en
-adelante se pasa el tipo ya casteado — no volver a leer `aliases` crudo del resultado de Prisma
-en otro lugar sin el mismo cast).
+**`MonitoredEntity.aliases` es `String[]` nativo** (array de Postgres) — ya no hace falta el
+workaround de `Json`/casteo manual que exigía MySQL (ver historial abajo). Si en algún lado del
+código todavía aparece un cast `as string[]` sobre `aliases`, es rezago del período MySQL y se
+puede simplificar.
 
 Comandos: `pnpm docker:db:up`, `pnpm docker:db:down`, `pnpm db:migrate`, `pnpm db:generate`,
-`pnpm db:studio`.
+`pnpm db:studio`. Para aplicar migraciones ya existentes en una base nueva (ej. Supabase recién
+creado) usar `pnpm exec prisma migrate deploy`, no `pnpm db:migrate` (que corre `migrate dev`,
+pensado para desarrollo activo y que pide una shadow database).
 
 ## Modelo de datos (prisma/schema.prisma)
 
@@ -165,10 +161,11 @@ que cualquier feature nueva debe respetar.
 
 ## Restricciones tecnológicas vigentes
 
-No introducir sin necesidad real y explícita: Supabase, Firebase, SQLite, MongoDB, Vercel,
-AWS/GCP/Azure, Kubernetes, Nx, Turborepo, microservicios, Redis, BullMQ. Docker se usa por
-ahora **únicamente** para el contenedor de la base de datos (MySQL) — backend, frontend y
-PostScope corren nativos. Esto va a cambiar cuando se haga la dockerización completa del stack
+No introducir sin necesidad real y explícita: Firebase, SQLite, MongoDB, Vercel, AWS/GCP/Azure,
+Kubernetes, Nx, Turborepo, microservicios, Redis, BullMQ. **Supabase ya no está en esta lista**:
+se adoptó explícitamente (2026-08-31) como hosting gratuito de Postgres para el despliegue — ver
+"Base de datos" arriba. Docker se usa por ahora **únicamente** para el contenedor de la base de
+datos (Postgres en local) — backend, frontend y PostScope corren nativos. Esto va a cambiar cuando se haga la dockerización completa del stack
 pendiente (ver "Historial: el incidente del refactor" más abajo), pero no adelantar eso sin que
 el usuario lo pida explícitamente. No exponer el backend públicamente ni hacer port forwarding;
 todo corre en `localhost` (o red local/VPN si se accede desde el celular). Secretos solo en
@@ -188,7 +185,7 @@ raíz antes de fallar. `apps/postscope` es la única excepción: usa npm con su 
 
 Completado:
 - Monorepo scaffolded (`apps/web`, `apps/backend`, `packages/shared`, `prisma/`).
-- MySQL en Docker, migración inicial aplicada (`prisma/migrations/`).
+- PostgreSQL en Docker (local) + Supabase (despliegue), migración inicial aplicada (`prisma/migrations/`).
 - Backend NestJS mínimo con `PrismaService` y `GET /health` (verifica DB).
 - `packages/shared` con los tipos de análisis y de fuente (esquemas Zod, no solo tipos TS).
 - Pipeline de IA (`apps/backend/src/analysis/`): `AIProvider` abstraído + `DeepSeekProvider`
@@ -331,22 +328,31 @@ nunca se hizo `git gc` agresivo, pero si en el futuro algo del backend/frontend/
 "desaparece" sin que esta sesión lo haya tocado, **este es el tipo de evento a sospechar
 primero** — revisar `git log --oneline` antes de asumir que hay un bug nuevo.
 
-Pendiente explícito, dicho por el usuario: **dockerizar todo el stack** (MySQL + backend +
+Pendiente explícito, dicho por el usuario: **dockerizar todo el stack** (base de datos + backend +
 web + PostScope, este último necesita una imagen base con Chromium) para poder exportarlo como
 imagen — se acordó dejarlo para el final, después de terminar el conector de Facebook y el
 resto de las features funcionales. No adelantar esa reorganización sin que el usuario lo pida.
 
-**Además**: el 2026-08-28 se migró de PostgreSQL a MySQL (ver sección "Base de datos" arriba) —
-esto pasó en esta misma sesión, no en el incidente del refactor. El usuario dijo "Postgres es
-muy pesado para este proyecto", lo cual técnicamente no es cierto (ambos motores tienen huella
-de recursos prácticamente idéntica para un proyecto de este tamaño) pero es su decisión y no
-hay razón funcional para insistir en revertirla.
+### Historial: ida y vuelta MySQL↔Postgres
+
+- **2026-08-28**: se migró de PostgreSQL (elección original del skill de construcción) a MySQL.
+  El usuario dijo "Postgres es muy pesado para este proyecto", lo cual técnicamente no era
+  cierto (ambos motores tienen huella de recursos prácticamente idéntica para un proyecto de
+  este tamaño), pero era su decisión y no había razón funcional para insistir en lo contrario.
+- **2026-08-31**: se migró de vuelta a PostgreSQL. Motivo esta vez es concreto y técnico, no de
+  preferencia: para desplegar gratis, el hosting elegido (**Supabase**) es Postgres-only — no
+  ofrece MySQL en ningún plan. Se revirtió el workaround de `aliases: Json` a `String[]` nativo
+  y se restauró `onDelete: Cascade` en `Alert.publication` (la restricción de "múltiples caminos
+  en cascada" que forzó a quitarlo era específica de MySQL; Postgres no la tiene). Las
+  migraciones se resetearon desde cero (el SQL de las migraciones de MySQL no es compatible con
+  Postgres). Si en el futuro alguien pregunta "¿por qué no estamos en MySQL?": esta es la razón,
+  y no tiene sentido volver a menos que cambie el proveedor de hosting de la base de datos.
 
 ## Comandos de desarrollo
 
 ```bash
 pnpm install
-pnpm docker:db:up        # levanta solo MySQL
+pnpm docker:db:up        # levanta solo Postgres
 pnpm db:migrate
 pnpm dev:backend          # NestJS, http://localhost:3200
 pnpm dev:web              # Vite, http://localhost:5173

@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "mysql"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -84,7 +84,7 @@ model Source {
 model MonitoredEntity {
   id        String   @id @default(cuid())
   name      String
-  aliases   Json     @default("[]")
+  aliases   String[] @default([])
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -149,9 +149,7 @@ model Alert {
   analysisId    String   @unique
   analysis      Analysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
   publicationId String
-  // Sin onDelete: Cascade acá a propósito: ya cascadea vía analysisId -> Analysis -> Publication.
-  // Un segundo camino en cascada hacia la misma tabla (Publication) no es válido en MySQL.
-  publication   Publication     @relation(fields: [publicationId], references: [id])
+  publication   Publication     @relation(fields: [publicationId], references: [id], onDelete: Cascade)
   entityId      String
   entity        MonitoredEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
   category      ContentCategory
