@@ -1,4 +1,4 @@
-import type { Page } from "playwright";
+import type { BrowserContext, Page } from "playwright";
 
 import { withFacebookContext } from "./browser";
 import { FacebookError } from "./errors";
@@ -138,21 +138,33 @@ function canonicalizePostLink(href: string): string {
   return url.href;
 }
 
+// Facebook renderiza el feed de forma perezosa: al cargar la página solo
+// aparecen los primeros 1-3 posts en el DOM, el resto se agrega recién
+// cuando el usuario scrollea (confirmado con evidencia real: pedir 10 solo
+// devolvía 1, porque nunca forzábamos la carga de más). Un scroll real de
+// mouse dispara ese lazy-load; un scrollTop/scrollIntoView no siempre lo hace.
+const MAX_SCROLL_ATTEMPTS = 8;
+const SCROLL_WAIT_MS = 1_500;
+
 /**
- * Fuente principal: busca un <a href> real dentro del feed/main que parezca
- * un permalink — es lo que realmente está renderizado arriba de la página,
- * en el mismo orden en que aparece en pantalla, así que el primer match es
- * confiablemente "lo más reciente" (así funcionó siempre para posts de texto
- * y foto). Espera a que el feed tenga AL MENOS un link (no específicamente
+ * Fuente principal: junta, en el mismo orden en que aparecen en pantalla,
+ * hasta `limit` links de publicación (normal o video/en vivo mezclados —
+ * mezclarlos acá es seguro porque respetamos el orden real del DOM, a
+ * diferencia del JSON embebido que no tiene orden confiable) dentro del
+ * feed/main. Espera a que el feed tenga AL MENOS un link (no específicamente
  * [role="article"]: las páginas de video/en vivo pueden no usar ese role en
  * absoluto, y exigirlo hacía que esta búsqueda nunca encontrara nada ahí).
+ * Scrollea (con esperas entre cada intento) hasta juntar `limit` o agotar
+ * los intentos, si la fuente tiene menos publicaciones que eso.
  */
-async function findPermalinkFromDom(
+async function collectLatestPostLinksFromDom(
   page: Page,
   pageUrl: string,
-  isMatch: (href: string) => boolean,
-): Promise<string | null> {
+  limit: number,
+): Promise<string[]> {
   const pageSegment = extractPageSegment(pageUrl);
+  const seen = new Set<string>();
+  const results: string[] = [];
 
   for (const containerSelector of ['[role="feed"]', '[role="main"]']) {
     const container = page.locator(containerSelector).first();
@@ -166,27 +178,45 @@ async function findPermalinkFromDom(
 
     if (!ready) continue;
 
-    const hrefs = await container
-      .locator("a[href]")
-      .evaluateAll((anchors) => anchors.map((anchor) => (anchor as HTMLAnchorElement).href))
-      .catch(() => [] as string[]);
+    for (let attempt = 0; attempt <= MAX_SCROLL_ATTEMPTS; attempt++) {
+      const hrefs = await container
+        .locator("a[href]")
+        .evaluateAll((anchors) => anchors.map((anchor) => (anchor as HTMLAnchorElement).href))
+        .catch(() => [] as string[]);
 
-    const match = hrefs.find((href) => isMatch(href) && belongsToPage(href, pageSegment));
-    if (match) return match;
+      for (const href of hrefs) {
+        if (results.length >= limit) break;
+        if (!(isNormalPostLink(href) || isVideoOrLiveLink(href))) continue;
+        if (!belongsToPage(href, pageSegment)) continue;
+
+        const canonical = canonicalizePostLink(href);
+        if (seen.has(canonical)) continue;
+        seen.add(canonical);
+        results.push(canonical);
+      }
+
+      if (results.length >= limit || attempt === MAX_SCROLL_ATTEMPTS) break;
+
+      await page.mouse.wheel(0, 3_000);
+      await page.waitForTimeout(SCROLL_WAIT_MS);
+    }
+
+    if (results.length > 0) break;
   }
 
-  return null;
+  return results;
 }
 
 /**
  * Último recurso si no hay ningún <a href> utilizable en el DOM: Facebook
  * también embebe el permalink en el JSON de hidratación del HTML inicial.
- * Riesgoso como fuente PRIMARIA — confirmado con un caso real: ese mismo JSON
- * puede traer el permalink de una publicación de OTRA página (un banner tipo
- * "alguien que seguís está en vivo ahora") o de una publicación VIEJA de la
- * MISMA página (no necesariamente la más reciente) — por eso solo se usa
- * cuando el DOM no dio ningún resultado, y aun así exige que el link
- * pertenezca a la página pedida.
+ * Riesgoso — confirmado con casos reales: ese mismo JSON puede traer el
+ * permalink de una publicación de OTRA página (un banner tipo "alguien que
+ * seguís está en vivo ahora") o de una publicación VIEJA de la MISMA página
+ * (no necesariamente la más reciente) — por eso solo se usa cuando el DOM no
+ * dio ningún resultado, exige que el link pertenezca a la página pedida, y
+ * solo puede devolver UN resultado confiable (no hay orden garantizado para
+ * armar una lista de varios).
  */
 async function findPermalinkFromEmbeddedJson(
   page: Page,
@@ -209,21 +239,125 @@ async function findPermalinkFromEmbeddedJson(
 }
 
 /**
- * "Obtener el último post, y de ahí seguir las reglas": primero se agota el
- * camino normal (post de texto/foto/compartido) completo, DOM y luego JSON.
- * Solo si eso no encuentra absolutamente nada se entra, como excepción
- * condicional, al parámetro de video/en vivo — nunca al revés, y nunca mezclados.
+ * "Obtener el/los último(s) post(s), y de ahí seguir las reglas": el DOM
+ * (orden real de pantalla) es la fuente confiable; el JSON embebido es el
+ * último recurso, y ahí sí respetamos la prioridad normal→video como
+ * excepción condicional (nunca al revés) porque no tiene orden garantizado.
  */
-async function findLatestPostLink(page: Page, pageUrl: string): Promise<string | null> {
-  const normal =
-    (await findPermalinkFromDom(page, pageUrl, isNormalPostLink)) ??
-    (await findPermalinkFromEmbeddedJson(page, pageUrl, isNormalPostLink));
-  if (normal) return normal;
+async function collectLatestPostLinks(page: Page, pageUrl: string, limit: number): Promise<string[]> {
+  const fromDom = await collectLatestPostLinksFromDom(page, pageUrl, limit);
+  if (fromDom.length > 0) return fromDom;
 
-  return (
-    (await findPermalinkFromDom(page, pageUrl, isVideoOrLiveLink)) ??
-    (await findPermalinkFromEmbeddedJson(page, pageUrl, isVideoOrLiveLink))
-  );
+  const fallback =
+    (await findPermalinkFromEmbeddedJson(page, pageUrl, isNormalPostLink)) ??
+    (await findPermalinkFromEmbeddedJson(page, pageUrl, isVideoOrLiveLink));
+
+  return fallback ? [canonicalizePostLink(fallback)] : [];
+}
+
+async function guardNavigation(page: Page) {
+  await page.route("**/*", async (route) => {
+    const request = route.request();
+    const mainNavigation = request.isNavigationRequest() && request.frame() === page.mainFrame();
+
+    if (mainNavigation && !isAllowedFacebookUrl(request.url())) {
+      console.warn("[Facebook] Blocked navigation outside facebook.com");
+      await route.abort("blockedbyclient");
+      return;
+    }
+
+    await route.continue();
+  });
+}
+
+/** Abre la URL de una página/perfil y valida sesión/disponibilidad — compartido por getLatestPagePost(s). */
+async function openFacebookPage(context: BrowserContext, requestedUrl: string): Promise<Page> {
+  const page = context.pages()[0] ?? (await context.newPage());
+  await guardNavigation(page);
+
+  console.info("[Facebook] Waiting for page...");
+  const response = await page.goto(requestedUrl, { waitUntil: "domcontentloaded" });
+
+  if (response?.status() === 404) {
+    throw new FacebookError("POST_NOT_FOUND", "La página no existe.", 404);
+  }
+
+  if (response && response.status() >= 500) {
+    throw new FacebookError("POST_NOT_ACCESSIBLE", "Facebook no pudo mostrar la página.", 403);
+  }
+
+  if (!isAllowedFacebookUrl(page.url())) {
+    throw new FacebookError("POST_NOT_ACCESSIBLE", "Facebook redirigió fuera de una página permitida.", 403);
+  }
+
+  if (/\/(login|checkpoint|recover)(\/|\.php|$)/i.test(new URL(page.url()).pathname)) {
+    throw new FacebookError(
+      "SESSION_EXPIRED",
+      "Facebook requiere que vuelvas a iniciar sesión manualmente.",
+      401,
+    );
+  }
+
+  if (!(await isFacebookAuthenticated(context, page))) {
+    throw new FacebookError("SESSION_EXPIRED", "La sesión de Facebook expiró. Inicia sesión nuevamente.", 401);
+  }
+
+  const unavailable = page
+    .locator('[role="main"]')
+    .getByText(
+      /(?:contenido|página) no (?:está|se encuentra) disponible|content isn't available|page isn't available|lo sentimos, se produjo un error/i,
+    )
+    .first();
+
+  if (await unavailable.isVisible().catch(() => false)) {
+    throw new FacebookError(
+      "POST_NOT_ACCESSIBLE",
+      "La página no está disponible o no tienes permiso para verla.",
+      403,
+    );
+  }
+
+  return page;
+}
+
+/** Navega a un permalink puntual (ya encontrado) y lo extrae. Devuelve null si ese post en particular no está disponible. */
+async function extractPostAtPermalink(
+  page: Page,
+  permalink: string,
+  requestedUrl: string,
+): Promise<FacebookPost | null> {
+  console.info(`[Facebook] Navegando al permalink de la publicación: ${permalink}`);
+  const postResponse = await page.goto(permalink, { waitUntil: "domcontentloaded" });
+
+  if (postResponse?.status() === 404) return null;
+
+  if (postResponse && postResponse.status() >= 500) {
+    throw new FacebookError("POST_NOT_ACCESSIBLE", "Facebook no pudo mostrar la publicación.", 403);
+  }
+
+  const postUnavailable = page
+    .locator('[role="dialog"]:visible, [role="main"]')
+    .getByText(
+      /(?:contenido|página) no (?:está|se encuentra) disponible|content isn't available|page isn't available|link you followed may be broken|sorry, something went wrong|lo sentimos, se produjo un error/i,
+    )
+    .first();
+
+  if (await postUnavailable.isVisible().catch(() => false)) return null;
+
+  // A diferencia de getFacebookPost() (URL de post explícita), acá NO rechazamos
+  // videos: si la publicación es un video, igual devolvemos su texto/caption
+  // (si tiene) e ignoramos el video en sí.
+  const post = await extractFacebookPost(page);
+
+  if (!post.text || post.text.trim().length === 0) {
+    // El chequeo de "sin texto" vive en el llamador — pero si Facebook SÍ
+    // mostraba una descripción visible (confirmado con un caso real:
+    // transmisiones en vivo), necesitamos el HTML real para saber por qué
+    // extractMessageText no la encontró, en vez de adivinar el selector.
+    await dumpDebugPage(page, "no-text-found");
+  }
+
+  return { ...post, url: normalizeVideoPermalink(permalink, requestedUrl) };
 }
 
 export async function getFacebookPost(input: unknown) {
@@ -236,20 +370,7 @@ export async function getFacebookPost(input: unknown) {
   console.info("[Facebook] Opening post...");
   return withFacebookContext<FacebookPost>(true, async (context) => {
     const page = context.pages()[0] ?? (await context.newPage());
-
-    await page.route("**/*", async (route) => {
-      const request = route.request();
-      const mainNavigation =
-        request.isNavigationRequest() && request.frame() === page.mainFrame();
-
-      if (mainNavigation && !isAllowedFacebookUrl(request.url())) {
-        console.warn("[Facebook] Blocked navigation outside facebook.com");
-        await route.abort("blockedbyclient");
-        return;
-      }
-
-      await route.continue();
-    });
+    await guardNavigation(page);
 
     console.info("[Facebook] Waiting for post...");
     const response = await page.goto(requestedUrl, { waitUntil: "domcontentloaded" });
@@ -321,81 +442,13 @@ export async function getLatestPagePost(input: unknown) {
 
   console.info("[Facebook] Opening page...");
   return withFacebookContext<FacebookPost>(true, async (context) => {
-    const page = context.pages()[0] ?? (await context.newPage());
-
-    await page.route("**/*", async (route) => {
-      const request = route.request();
-      const mainNavigation =
-        request.isNavigationRequest() && request.frame() === page.mainFrame();
-
-      if (mainNavigation && !isAllowedFacebookUrl(request.url())) {
-        console.warn("[Facebook] Blocked navigation outside facebook.com");
-        await route.abort("blockedbyclient");
-        return;
-      }
-
-      await route.continue();
-    });
-
-    console.info("[Facebook] Waiting for page...");
-    const response = await page.goto(requestedUrl, { waitUntil: "domcontentloaded" });
-
-    if (response?.status() === 404) {
-      throw new FacebookError("POST_NOT_FOUND", "La página no existe.", 404);
-    }
-
-    if (response && response.status() >= 500) {
-      throw new FacebookError("POST_NOT_ACCESSIBLE", "Facebook no pudo mostrar la página.", 403);
-    }
-
-    if (!isAllowedFacebookUrl(page.url())) {
-      throw new FacebookError(
-        "POST_NOT_ACCESSIBLE",
-        "Facebook redirigió fuera de una página permitida.",
-        403,
-      );
-    }
-
-    if (/\/(login|checkpoint|recover)(\/|\.php|$)/i.test(new URL(page.url()).pathname)) {
-      throw new FacebookError(
-        "SESSION_EXPIRED",
-        "Facebook requiere que vuelvas a iniciar sesión manualmente.",
-        401,
-      );
-    }
-
-    if (!(await isFacebookAuthenticated(context, page))) {
-      throw new FacebookError("SESSION_EXPIRED", "La sesión de Facebook expiró. Inicia sesión nuevamente.", 401);
-    }
-
-    const unavailable = page
-      .locator('[role="main"]')
-      .getByText(
-        /(?:contenido|página) no (?:está|se encuentra) disponible|content isn't available|page isn't available|lo sentimos, se produjo un error/i,
-      )
-      .first();
-
-    if (await unavailable.isVisible().catch(() => false)) {
-      throw new FacebookError(
-        "POST_NOT_ACCESSIBLE",
-        "La página no está disponible o no tienes permiso para verla.",
-        403,
-      );
-    }
+    const page = await openFacebookPage(context, requestedUrl);
 
     console.info("[Facebook] Page opened successfully, looking for the latest post's link...");
-
-    // En vez de parsear el feed en el sitio (frágil: comentarios, respuestas y
-    // esqueletos de carga también usan role="article", y ya probamos y fallamos con
-    // esa estrategia varias veces) hacemos lo mínimo posible acá: encontrar el link
-    // al permalink de la primera publicación del timeline, y re-navegar a esa URL.
-    // Ahí Facebook muestra el post en un [role="dialog"] aislado — el MISMO patrón
-    // que ya usa getFacebookPost()/extractFacebookPost() para un post puntual.
-    //
     // Importante: si no aparece ningún link confiable, NO adivinamos con
     // cualquier link de la página entera — eso una vez trajo un link de
     // notificación de OTRA persona. Mejor fallar con diagnóstico.
-    const foundHref = await findLatestPostLink(page, requestedUrl);
+    const [foundHref] = await collectLatestPostLinks(page, requestedUrl, 1);
 
     if (!foundHref) {
       await dumpDebugPage(page, "no-post-link-found");
@@ -406,47 +459,53 @@ export async function getLatestPagePost(input: unknown) {
       );
     }
 
-    const permalink = canonicalizePostLink(foundHref);
+    const post = await extractPostAtPermalink(page, foundHref, requestedUrl);
 
-    console.info(`[Facebook] Navegando al permalink de la última publicación: ${permalink}`);
-    const postResponse = await page.goto(permalink, { waitUntil: "domcontentloaded" });
-
-    if (postResponse?.status() === 404) {
+    if (!post) {
       throw new FacebookError("POST_NOT_FOUND", "La publicación no existe.", 404);
     }
 
-    if (postResponse && postResponse.status() >= 500) {
-      throw new FacebookError("POST_NOT_ACCESSIBLE", "Facebook no pudo mostrar la publicación.", 403);
-    }
+    return post;
+  });
+}
 
-    const postUnavailable = page
-      .locator('[role="dialog"]:visible, [role="main"]')
-      .getByText(
-        /(?:contenido|página) no (?:está|se encuentra) disponible|content isn't available|page isn't available|link you followed may be broken|sorry, something went wrong|lo sentimos, se produjo un error/i,
-      )
-      .first();
+/**
+ * Igual que getLatestPagePost(), pero junta hasta `limit` publicaciones
+ * recientes del timeline en vez de solo la última — para poder revisar de
+ * una varias publicaciones nuevas en lugar de tener que hacerlo una por una.
+ * El llamador (FacebookService) es responsable de deduplicar contra lo que
+ * ya está guardado — acá simplemente se devuelve la lista, en el mismo
+ * orden (más reciente primero) en que aparecen en el timeline.
+ */
+export async function getLatestPagePosts(input: unknown, limit = 10): Promise<FacebookPost[]> {
+  const requestedUrl = normalizeFacebookPageUrl(input);
 
-    if (await postUnavailable.isVisible().catch(() => false)) {
+  if (!(await hasStoredSession())) {
+    throw new FacebookError("SESSION_REQUIRED", "Necesitas iniciar sesión en Facebook.", 401);
+  }
+
+  console.info("[Facebook] Opening page...");
+  return withFacebookContext<FacebookPost[]>(true, async (context) => {
+    const page = await openFacebookPage(context, requestedUrl);
+
+    console.info(`[Facebook] Page opened successfully, looking for up to ${limit} recent posts...`);
+    const permalinks = await collectLatestPostLinks(page, requestedUrl, limit);
+
+    if (permalinks.length === 0) {
+      await dumpDebugPage(page, "no-post-link-found");
       throw new FacebookError(
-        "POST_NOT_ACCESSIBLE",
-        "La publicación no está disponible o no tienes permiso para verla.",
-        403,
+        "EXTRACTION_FAILED",
+        "No se encontró ningún link a una publicación en esta página. Se guardó un volcado en .facebook-debug/ para diagnosticar.",
+        422,
       );
     }
 
-    // A diferencia de getFacebookPost() (URL de post explícita), acá NO rechazamos
-    // videos: si la última publicación es un video, igual devolvemos su texto/caption
-    // (si tiene) e ignoramos el video en sí.
-    const post = await extractFacebookPost(page);
-
-    if (!post.text || post.text.trim().length === 0) {
-      // checkLatestFromSource() va a rechazar esto por falta de texto — pero si
-      // Facebook SÍ mostraba una descripción visible (confirmado con un caso real:
-      // transmisiones en vivo), necesitamos el HTML real para saber por qué
-      // extractMessageText no la encontró, en vez de adivinar el selector.
-      await dumpDebugPage(page, "no-text-found");
+    const posts: FacebookPost[] = [];
+    for (const permalink of permalinks) {
+      const post = await extractPostAtPermalink(page, permalink, requestedUrl);
+      if (post) posts.push(post);
     }
 
-    return { ...post, url: normalizeVideoPermalink(permalink, requestedUrl) };
+    return posts;
   });
 }

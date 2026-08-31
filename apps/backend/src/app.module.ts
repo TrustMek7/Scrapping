@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
+import { ScheduleModule } from "@nestjs/schedule";
 import { AppController } from "./app.controller";
 import { PrismaModule } from "./prisma/prisma.module";
 import { AnalysisModule } from "./analysis/analysis.module";
@@ -14,6 +15,7 @@ import { FacebookModule } from "./facebook/facebook.module";
       isGlobal: true,
       envFilePath: "../../.env",
     }),
+    ScheduleModule.forRoot(),
     PrismaModule,
     AnalysisModule,
     AlertsModule,

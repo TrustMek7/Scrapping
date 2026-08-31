@@ -118,32 +118,50 @@ export const loginFacebook = () =>
 export const logoutFacebook = () =>
   request<{ status: FacebookSessionStatus }>("/facebook/session", { method: "DELETE" });
 
-export interface CheckSourceResult {
-  deduplicated: boolean;
-  analysis: {
-    status: "COMPLETED" | "FAILED";
-    relevant: boolean | null;
-    category: ContentCategory | null;
-    severity: Severity | null;
-    confidence: number | null;
-  } | null;
-  alert: { id: string } | null;
+export interface AutoCheckStatus {
+  enabled: boolean;
+  intervalMinutes: number;
+  lastRunAt: string | null;
 }
 
-export const checkFacebookSource = (sourceId: string) =>
-  request<CheckSourceResult>(`/facebook/sources/${sourceId}/check`, { method: "POST" });
+export const fetchAutoCheckStatus = () => request<AutoCheckStatus>("/facebook/auto-check");
+export const setAutoCheck = (enabled: boolean, intervalMinutes?: number) =>
+  request<AutoCheckStatus>("/facebook/auto-check", {
+    method: "POST",
+    body: JSON.stringify({ enabled, intervalMinutes }),
+  });
+
+/** Revisar una fuente ahora trae hasta N publicaciones nuevas (no solo la última), una entrada por post. */
+export interface CheckSourcePostOutcome {
+  url: string;
+  ok: boolean;
+  error?: string;
+  deduplicated?: boolean;
+  relevant?: boolean | null;
+  category?: ContentCategory | null;
+  alertCreated?: boolean;
+}
+
+export const checkFacebookSource = (sourceId: string, limit?: number) =>
+  request<CheckSourcePostOutcome[]>(
+    `/facebook/sources/${sourceId}/check${limit ? `?limit=${limit}` : ""}`,
+    { method: "POST" },
+  );
 
 export interface CheckAllSourcesResultItem {
   sourceId: string;
   sourceName: string;
   ok: boolean;
   error?: string;
-  deduplicated?: boolean;
-  alertCreated?: boolean;
+  newPublications?: number;
+  newAlerts?: number;
 }
 
-export const checkAllFacebookSources = () =>
-  request<CheckAllSourcesResultItem[]>("/facebook/sources/check-all", { method: "POST" });
+export const checkAllFacebookSources = (limit?: number) =>
+  request<CheckAllSourcesResultItem[]>(
+    `/facebook/sources/check-all${limit ? `?limit=${limit}` : ""}`,
+    { method: "POST" },
+  );
 
 /** Temporal: para verificar el pipeline de análisis aunque no genere alerta. */
 export interface RecentPublicationItem {

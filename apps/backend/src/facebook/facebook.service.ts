@@ -2,17 +2,29 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from "@nes
 import { PrismaService } from "../prisma/prisma.service";
 import { AnalysisService } from "../analysis/analysis.service";
 import { checkSession, resetSession, startLogin } from "./lib/session";
-import { getLatestPagePost } from "./lib/navigation";
+import { getLatestPagePosts } from "./lib/navigation";
 import { normalizeFacebookPageUrl } from "./lib/validators";
 import { getFacebookImage } from "./lib/image-cache";
+
+const DEFAULT_POST_LIMIT = 10;
+
+export interface CheckSourcePostOutcome {
+  url: string;
+  ok: boolean;
+  error?: string;
+  deduplicated?: boolean;
+  relevant?: boolean | null;
+  category?: string | null;
+  alertCreated?: boolean;
+}
 
 export interface CheckAllSourcesResultItem {
   sourceId: string;
   sourceName: string;
   ok: boolean;
   error?: string;
-  deduplicated?: boolean;
-  alertCreated?: boolean;
+  newPublications?: number;
+  newAlerts?: number;
 }
 
 @Injectable()
@@ -41,11 +53,15 @@ export class FacebookService {
   }
 
   /**
-   * Revisa la última publicación de una Source de tipo FACEBOOK ya registrada,
-   * y si tiene texto, la manda directo al pipeline de análisis (dedup + IA + alerta).
-   * Actualiza lastRunAt/lastError/lastPublicationAt/publicationsCount de la Source.
+   * Revisa hasta `limit` publicaciones recientes de una Source de tipo
+   * FACEBOOK ya registrada, de la más nueva a la más vieja, mandando cada una
+   * con texto al pipeline de análisis (dedup + IA + alerta). Se detiene apenas
+   * encuentra una publicación que el pipeline reconoce como duplicada (mismo
+   * contentHash) — eso significa que ya se procesó en una revisión anterior,
+   * así que todo lo que sigue debajo en el timeline también es viejo. En una
+   * fuente nueva sin historial, esto hace un backfill de hasta `limit` posts.
    */
-  async checkLatestFromSource(sourceId: string) {
+  async checkLatestFromSource(sourceId: string, limit = DEFAULT_POST_LIMIT): Promise<CheckSourcePostOutcome[]> {
     const source = await this.prisma.source.findUnique({ where: { id: sourceId } });
     if (!source) {
       throw new NotFoundException("Fuente no encontrada");
@@ -54,36 +70,61 @@ export class FacebookService {
       throw new BadRequestException("Esta acción solo está disponible para fuentes de tipo FACEBOOK");
     }
 
+    const outcomes: CheckSourcePostOutcome[] = [];
+
     try {
       const pageUrl = normalizeFacebookPageUrl(source.url);
-      const post = await getLatestPagePost(pageUrl);
+      const posts = await getLatestPagePosts(pageUrl, limit);
 
-      if (!post.text || post.text.trim().length === 0) {
-        throw new BadRequestException(
-          "La última publicación de esta página no tiene texto (parece ser solo imagen). Todavía no hay OCR configurado, así que no se puede analizar automáticamente.",
-        );
+      let newCount = 0;
+
+      for (const post of posts) {
+        if (!post.text || post.text.trim().length === 0) {
+          outcomes.push({
+            url: post.url,
+            ok: false,
+            error: "Esta publicación no tiene texto (parece ser solo imagen/video). Todavía no hay OCR configurado.",
+          });
+          continue;
+        }
+
+        const result = await this.analysisService.runAndPersist({
+          sourceId: source.id,
+          title: `Publicación de ${post.author.name ?? source.name}`,
+          content: post.text,
+          url: post.url,
+          images: post.images,
+        });
+
+        outcomes.push({
+          url: post.url,
+          ok: true,
+          deduplicated: result.deduplicated,
+          relevant: result.analysis?.relevant ?? null,
+          category: result.analysis?.category ?? null,
+          alertCreated: !!result.alert,
+        });
+
+        // Ya llegamos a contenido que se procesó en una revisión anterior —
+        // todo lo que sigue en el timeline es más viejo todavía. Frenamos acá
+        // para no gastar más navegación/tiempo en posts que ya conocemos.
+        if (result.deduplicated) break;
+
+        newCount += 1;
       }
-
-      const result = await this.analysisService.runAndPersist({
-        sourceId: source.id,
-        title: `Publicación de ${post.author.name ?? source.name}`,
-        content: post.text,
-        url: post.url,
-        images: post.images,
-      });
 
       await this.prisma.source.update({
         where: { id: source.id },
         data: {
           lastRunAt: new Date(),
           lastError: null,
-          ...(result.deduplicated
-            ? {}
-            : { lastPublicationAt: new Date(), publicationsCount: { increment: 1 } }),
+          ...(newCount > 0
+            ? { lastPublicationAt: new Date(), publicationsCount: { increment: newCount } }
+            : {}),
         },
       });
 
-      return result;
+      return outcomes;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Error desconocido al revisar la fuente.";
       this.logger.error(`[FACEBOOK] falló la revisión de "${source.name}": ${message}`);
@@ -105,7 +146,7 @@ export class FacebookService {
    * misma sesión de navegador). El fallo de una fuente no detiene a las demás
    * — cada resultado (éxito o error) se acumula y se devuelve al final.
    */
-  async checkAllActiveSources(): Promise<CheckAllSourcesResultItem[]> {
+  async checkAllActiveSources(limit = DEFAULT_POST_LIMIT): Promise<CheckAllSourcesResultItem[]> {
     const sources = await this.prisma.source.findMany({
       where: { type: "FACEBOOK", status: "ACTIVE" },
     });
@@ -114,13 +155,13 @@ export class FacebookService {
 
     for (const source of sources) {
       try {
-        const result = await this.checkLatestFromSource(source.id);
+        const outcomes = await this.checkLatestFromSource(source.id, limit);
         results.push({
           sourceId: source.id,
           sourceName: source.name,
           ok: true,
-          deduplicated: result.deduplicated,
-          alertCreated: !!result.alert,
+          newPublications: outcomes.filter((o) => o.ok && !o.deduplicated).length,
+          newAlerts: outcomes.filter((o) => o.alertCreated).length,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Error desconocido.";

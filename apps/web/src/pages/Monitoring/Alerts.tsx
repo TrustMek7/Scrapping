@@ -13,6 +13,7 @@ import {
 import Badge from "../../components/ui/badge/Badge";
 import Button from "../../components/ui/button/Button";
 import Select from "../../components/form/Select";
+import Input from "../../components/form/input/InputField";
 import { Modal } from "../../components/ui/modal";
 import ConfirmDialog from "../../components/common/ConfirmDialog";
 import { useToast } from "../../context/ToastContext";
@@ -21,12 +22,15 @@ import {
   checkFacebookSource,
   deleteAllPublications,
   fetchAlerts,
+  fetchAutoCheckStatus,
   fetchFacebookSession,
   fetchRecentPublications,
   fetchSources,
   loginFacebook,
   logoutFacebook,
+  setAutoCheck,
   type AlertListItem,
+  type AutoCheckStatus,
   type FacebookSessionStatus,
   type RecentPublicationItem,
   type SourceItem,
@@ -65,6 +69,9 @@ export default function MonitoringAlerts() {
   const [loginPending, setLoginPending] = useState(false);
   const [checking, setChecking] = useState(false);
   const [checkingAll, setCheckingAll] = useState(false);
+  const [postLimit, setPostLimit] = useState(10);
+  const [autoCheck, setAutoCheckState] = useState<AutoCheckStatus | null>(null);
+  const [autoCheckPending, setAutoCheckPending] = useState(false);
 
   const load = () => {
     setLoading(true);
@@ -94,7 +101,27 @@ export default function MonitoringAlerts() {
     fetchSources()
       .then((sources) => setFacebookSources(sources.filter((s) => s.type === "FACEBOOK" && s.status === "ACTIVE")))
       .catch(() => undefined);
+    fetchAutoCheckStatus()
+      .then(setAutoCheckState)
+      .catch(() => undefined);
   }, []);
+
+  const handleToggleAutoCheck = async () => {
+    setAutoCheckPending(true);
+    try {
+      const next = await setAutoCheck(!autoCheck?.enabled, 60);
+      setAutoCheckState(next);
+      toast.success(
+        next.enabled
+          ? `Revisión automática activada, cada ${next.intervalMinutes} minuto(s).`
+          : "Revisión automática desactivada.",
+      );
+    } catch (err) {
+      toast.error((err as Error).message);
+    } finally {
+      setAutoCheckPending(false);
+    }
+  };
 
   const handleLogin = async () => {
     setLoginPending(true);
@@ -124,20 +151,20 @@ export default function MonitoringAlerts() {
     if (!selectedSourceId) return;
     setChecking(true);
     try {
-      const result = await checkFacebookSource(selectedSourceId);
-      if (result.deduplicated) {
-        toast.success("La última publicación ya se había analizado antes (sin novedades).");
-      } else if (result.analysis?.status === "FAILED") {
-        toast.error("El análisis de IA falló para esta publicación.");
+      const outcomes = await checkFacebookSource(selectedSourceId, postLimit);
+      const newOnes = outcomes.filter((o) => o.ok && !o.deduplicated);
+      const alerts = newOnes.filter((o) => o.alertCreated).length;
+      const skipped = outcomes.filter((o) => !o.ok).length;
+
+      if (outcomes.length === 0) {
+        toast.error("No se encontró ninguna publicación para revisar.");
+      } else if (newOnes.length === 0) {
+        toast.success("No hay publicaciones nuevas desde la última revisión.");
       } else {
-        const parts = [
-          `Relevante: ${result.analysis?.relevant ? "sí" : "no"}`,
-          `categoría: ${result.analysis?.category ?? "—"}`,
-        ];
         toast.success(
-          result.alert
-            ? `🔴 Nueva alerta generada (${parts.join(", ")}).`
-            : `Publicación analizada, sin alerta (${parts.join(", ")}).`,
+          `${newOnes.length} publicación(es) nueva(s): ${alerts} alerta(s)${
+            skipped > 0 ? `, ${skipped} sin texto/OCR` : ""
+          }.`,
         );
       }
       load();
@@ -152,16 +179,16 @@ export default function MonitoringAlerts() {
   const handleCheckAll = async () => {
     setCheckingAll(true);
     try {
-      const results = await checkAllFacebookSources();
-      const newAlerts = results.filter((r) => r.ok && r.alertCreated).length;
-      const noNews = results.filter((r) => r.ok && !r.alertCreated).length;
+      const results = await checkAllFacebookSources(postLimit);
+      const newPublications = results.reduce((sum, r) => sum + (r.newPublications ?? 0), 0);
+      const newAlerts = results.reduce((sum, r) => sum + (r.newAlerts ?? 0), 0);
       const failed = results.filter((r) => !r.ok).length;
 
       if (results.length === 0) {
         toast.error("No hay fuentes de Facebook activas para revisar.");
       } else {
         toast.success(
-          `${results.length} fuente(s) revisada(s): ${newAlerts} alerta(s) nueva(s), ${noNews} sin novedades, ${failed} con error.`,
+          `${results.length} fuente(s) revisada(s): ${newPublications} publicación(es) nueva(s), ${newAlerts} alerta(s), ${failed} con error.`,
         );
       }
       if (failed > 0) {
@@ -328,6 +355,29 @@ const handleExportRecentPublications = async () => {
             </p>
           )}
 
+          <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-gray-100 pt-3 dark:border-white/[0.05]">
+            <span className="text-sm text-gray-500 dark:text-gray-400">
+              Revisión automática:{" "}
+              <strong>{autoCheck?.enabled ? `activada (cada ${autoCheck.intervalMinutes} min)` : "apagada"}</strong>
+              {autoCheck?.enabled && autoCheck.lastRunAt && (
+                <> — última corrida: {new Date(autoCheck.lastRunAt).toLocaleString()}</>
+              )}
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleToggleAutoCheck}
+              disabled={autoCheckPending || sessionStatus !== "active"}
+            >
+              {autoCheckPending ? "..." : autoCheck?.enabled ? "Apagar" : "Prender"}
+            </Button>
+            {!autoCheck?.enabled && (
+              <span className="text-xs text-gray-400 dark:text-gray-500">
+                Revisa todas las fuentes activas cada 60 min. Se apaga sola si reiniciás el backend.
+              </span>
+            )}
+          </div>
+
           <div className="mt-4 flex flex-wrap items-center gap-3">
             <div className="w-full sm:w-64">
               <Select
@@ -336,12 +386,27 @@ const handleExportRecentPublications = async () => {
                 onChange={setSelectedSourceId}
               />
             </div>
+            <div className="flex items-center gap-2">
+              <label htmlFor="post-limit" className="text-sm text-gray-500 dark:text-gray-400 whitespace-nowrap">
+                Últimas N:
+              </label>
+              <div className="w-20">
+                <Input
+                  id="post-limit"
+                  type="number"
+                  min="1"
+                  max="50"
+                  value={postLimit}
+                  onChange={(e) => setPostLimit(Math.max(1, Math.min(50, Number(e.target.value) || 1)))}
+                />
+              </div>
+            </div>
             <Button
               size="sm"
               onClick={handleCheckSource}
               disabled={checking || checkingAll || sessionStatus !== "active" || !selectedSourceId}
             >
-              {checking ? "Revisando..." : "Revisar última publicación"}
+              {checking ? "Revisando..." : "Revisar publicaciones nuevas"}
             </Button>
             <Button
               size="sm"
