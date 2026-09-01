@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { AnalysisResult, SourceType } from "@scrapping/shared";
 import { PrismaService } from "../prisma/prisma.service";
 import { AI_PROVIDER, AIProvider, AnalysisInput, MonitoredEntityInput } from "./ai-provider.interface";
+import { MailService } from "../notifications/mail.service";
 
 export interface PublicationImageInput {
   url: string;
@@ -40,6 +41,7 @@ export class AnalysisService {
     @Inject(AI_PROVIDER) private readonly aiProvider: AIProvider,
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly mailService: MailService,
   ) {}
 
   /** Corre el análisis sin persistir nada — útil para probar el prompt/modelo. */
@@ -99,12 +101,14 @@ export class AnalysisService {
       aliases: e.aliases,
     }));
 
+    const source = await this.prisma.source.findUniqueOrThrow({ where: { id: input.sourceId } });
+
     let result: AnalysisResult;
     try {
       result = await this.aiProvider.analyze({
         title: input.title,
         content: input.content,
-        sourceName: (await this.prisma.source.findUniqueOrThrow({ where: { id: input.sourceId } })).name,
+        sourceName: source.name,
         publishedAt: input.publishedAt,
         monitoredEntities: monitoredEntities.map((e) => ({ name: e.name, aliases: e.aliases })),
       });
@@ -137,7 +141,7 @@ export class AnalysisService {
 
     await this.linkMatchedEntities(publication.id, result.entities, monitoredEntities);
 
-    const alert = await this.maybeCreateAlert(analysis.id, publication.id, result, monitoredEntities);
+    const alert = await this.maybeCreateAlert(analysis.id, publication, source.name, result, monitoredEntities);
 
     return { publication, analysis, alert, deduplicated: false };
   }
@@ -221,7 +225,8 @@ export class AnalysisService {
    */
   private async maybeCreateAlert(
     analysisId: string,
-    publicationId: string,
+    publication: { id: string; title: string; url: string },
+    sourceName: string,
     result: AnalysisResult,
     monitoredEntities: { id: string; name: string; aliases: string[] }[],
   ) {
@@ -246,7 +251,7 @@ export class AnalysisService {
     const alert = await this.prisma.alert.create({
       data: {
         analysisId,
-        publicationId,
+        publicationId: publication.id,
         entityId: entity.id,
         category: result.category,
         severity: result.severity,
@@ -255,7 +260,19 @@ export class AnalysisService {
       },
     });
 
-    this.logger.log(`[ALERT] alerta creada (publicationId=${publicationId}, entity=${entity.name})`);
+    this.logger.log(`[ALERT] alerta creada (publicationId=${publication.id}, entity=${entity.name})`);
+
+    await this.mailService.sendAlertEmail({
+      entityName: entity.name,
+      category: result.category,
+      severity: result.severity,
+      confidence: result.confidence,
+      summary: result.summary,
+      sourceName,
+      publicationTitle: publication.title,
+      publicationUrl: publication.url,
+    });
+
     return alert;
   }
 
