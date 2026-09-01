@@ -142,11 +142,16 @@ export interface CheckSourcePostOutcome {
   alertCreated?: boolean;
 }
 
-export const checkFacebookSource = (sourceId: string, limit?: number) =>
-  request<CheckSourcePostOutcome[]>(
-    `/facebook/sources/${sourceId}/check${limit ? `?limit=${limit}` : ""}`,
+export const checkFacebookSource = (sourceId: string, limit?: number, headless = true) => {
+  const params = new URLSearchParams();
+  if (limit) params.set("limit", String(limit));
+  if (!headless) params.set("headless", "false");
+  const qs = params.toString();
+  return request<CheckSourcePostOutcome[]>(
+    `/facebook/sources/${sourceId}/check${qs ? `?${qs}` : ""}`,
     { method: "POST" },
   );
+};
 
 export interface CheckAllSourcesResultItem {
   sourceId: string;

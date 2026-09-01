@@ -51,12 +51,87 @@ function extractVideoId(href: string): string | null {
   }
 }
 
+/** Rótulos de la interfaz de Facebook para controles de video — no son captions reales. */
+const VIDEO_UI_LABELS = new Set([
+  "en reproducción",
+  "reproduciendo",
+  "en vivo",
+  "directo",
+  "ver video",
+  "reproducir video",
+  "pausado",
+  "volver a reproducir",
+]);
+
+/** Saca el fbid de una URL /photo/?fbid=...&set=a...., si la tiene. */
+function extractPhotoId(href: string): string | null {
+  try {
+    return new URL(href, "https://www.facebook.com").searchParams.get("fbid");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Los posts de una sola foto (`/photo/?fbid=...&set=a....`) abren un visor tipo
+ * lightbox — confirmado con evidencia real (dumps en .facebook-debug/) que ningún
+ * selector de los demás niveles encuentra el caption ahí: no hay
+ * [data-ad-preview="message"], ni link de video, ni spans "dir=auto" con el texto.
+ * El caption sí vive en el JSON de hidratación embebido en el HTML, asociado al
+ * "photo_id" de la foto actual (`\"photo_id\":\"{id}\"` seguido de
+ * `"message":{"text":"..."}` o `"message":null` cuando la foto realmente no tiene
+ * texto propio, ej. cambios de foto de perfil) — lo leemos de ahí en vez de la UI.
+ */
+async function extractMessageTextFromPhotoJson(page: Page, photoId: string): Promise<string | null> {
+  const html = await page.content();
+  const marker = `photo_id\\":\\"${photoId}`;
+  const markerIndex = html.indexOf(marker);
+  if (markerIndex === -1) return null;
+
+  // Búsqueda acotada por distancia, no por tamaño de ventana: un caption largo
+  // con muchos caracteres en negrita Unicode (\uXXXX, 6+ bytes cada uno) puede
+  // superar fácilmente varios miles de caracteres una vez escapado en el JSON —
+  // confirmado con evidencia real (un caption de "Juegos Florales" con distancia
+  // marcador→cierre de más de 5000 caracteres, que una ventana fija cortaba a
+  // mitad de camino sin que el regex llegara a ver el cierre `"}`).
+  const MAX_DISTANCE = 10_000;
+  const textKey = '"message":{"text":"';
+  const nullKey = '"message":null';
+  const textIndex = html.indexOf(textKey, markerIndex);
+  const nullIndex = html.indexOf(nullKey, markerIndex);
+
+  const textFound = textIndex !== -1 && textIndex - markerIndex <= MAX_DISTANCE;
+  const nullFound = nullIndex !== -1 && nullIndex - markerIndex <= MAX_DISTANCE;
+  if (!textFound) return null;
+  if (nullFound && nullIndex < textIndex) return null;
+
+  let i = textIndex + textKey.length;
+  while (i < html.length && html[i] !== '"') {
+    if (html[i] === "\\") i++;
+    i++;
+  }
+  if (i >= html.length) return null;
+
+  try {
+    const decoded = (JSON.parse(`"${html.slice(textIndex + textKey.length, i)}"`) as string).trim();
+    return decoded || null;
+  } catch {
+    return null;
+  }
+}
+
 async function extractMessageText(post: Locator, page: Page) {
   const message = post
     .locator('[data-ad-preview="message"], [data-ad-comet-preview="message"]')
     .first();
 
   if (!(await message.isVisible().catch(() => false))) {
+    const photoId = extractPhotoId(page.url());
+    if (photoId) {
+      const jsonText = await extractMessageTextFromPhotoJson(page, photoId);
+      if (jsonText) return jsonText;
+    }
+
     // Transmisiones en vivo (y algunos videos) no ponen el texto en el bloque de
     // mensaje habitual: el caption vive como texto clickeable dentro del propio
     // link al video — confirmado con evidencia real:
@@ -76,7 +151,29 @@ async function extractMessageText(post: Locator, page: Page) {
       if (currentVideoId && extractVideoId(href ?? "") !== currentVideoId) continue;
 
       const cleaned = cleanText(await link.textContent().catch(() => null));
-      if (cleaned && cleaned.length > 5) return cleaned;
+      // Cuando un video en vivo termina, Facebook muestra un control de "volver a
+      // reproducir" con el mismo link al video — confirmado con evidencia real:
+      // se coló "EN REPRODUCCIÓN" (rótulo de la interfaz, no un caption) porque
+      // técnicamente cumplía "mismo id de video". Excluimos esos rótulos conocidos.
+      if (cleaned && cleaned.length > 5 && !VIDEO_UI_LABELS.has(cleaned.toLowerCase())) {
+        return cleaned;
+      }
+    }
+
+    // Los reels abren en un visor de pantalla completa — layout distinto a
+    // todo lo anterior, sin data-ad-preview ni link de video con texto.
+    // Confirmado con evidencia real: el caption vive en un <div> suelto
+    // dentro de un <span dir="auto">, sin ningún atributo que lo identifique
+    // puntualmente. Último recurso: el primer bloque de texto largo dentro
+    // de spans "dir=auto" del contenedor.
+    const autoDirBlocks = post.locator('span[dir="auto"] > div');
+    const autoDirCount = await autoDirBlocks.count().catch(() => 0);
+
+    for (let i = 0; i < autoDirCount; i++) {
+      const cleaned = cleanText(await autoDirBlocks.nth(i).textContent().catch(() => null));
+      if (cleaned && cleaned.length > 15 && !VIDEO_UI_LABELS.has(cleaned.toLowerCase())) {
+        return cleaned;
+      }
     }
 
     return null;

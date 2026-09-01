@@ -61,7 +61,11 @@ export class FacebookService {
    * así que todo lo que sigue debajo en el timeline también es viejo. En una
    * fuente nueva sin historial, esto hace un backfill de hasta `limit` posts.
    */
-  async checkLatestFromSource(sourceId: string, limit = DEFAULT_POST_LIMIT): Promise<CheckSourcePostOutcome[]> {
+  async checkLatestFromSource(
+    sourceId: string,
+    limit = DEFAULT_POST_LIMIT,
+    headless = true,
+  ): Promise<CheckSourcePostOutcome[]> {
     const source = await this.prisma.source.findUnique({ where: { id: sourceId } });
     if (!source) {
       throw new NotFoundException("Fuente no encontrada");
@@ -74,7 +78,7 @@ export class FacebookService {
 
     try {
       const pageUrl = normalizeFacebookPageUrl(source.url);
-      const posts = await getLatestPagePosts(pageUrl, limit);
+      const posts = await getLatestPagePosts(pageUrl, limit, headless);
 
       let newCount = 0;
 

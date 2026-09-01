@@ -47,6 +47,17 @@ function isNormalPostLink(href: string): boolean {
     /\/posts\//.test(url.pathname) ||
     /\/permalink\.php$/.test(url.pathname) ||
     /\/photos\//.test(url.pathname) ||
+    // "/photo/?fbid=...&set=a.{album}" (singular) es el link real de una
+    // publicación de solo-foto dentro del feed. OJO: "/photo/" también lo usa
+    // el carrusel de "Fotos" de la barra lateral, pero con "set=pb.{id
+    // numérico}" (navegación del álbum del perfil) — ese NO es una
+    // publicación, es solo el visor de fotos, y da "sin texto" siempre.
+    // Confirmado con evidencia real: aceptar "/photo/" sin distinguir el
+    // "set" trajo puro contenido del carrusel, ninguna publicación real.
+    // Por eso se exige específicamente "set=a." (álbum), no "set=pb." (perfil).
+    (/^\/photo\/?$/.test(url.pathname) &&
+      url.searchParams.has("fbid") &&
+      (url.searchParams.get("set") ?? "").startsWith("a.")) ||
     url.searchParams.has("story_fbid")
   );
 }
@@ -68,14 +79,23 @@ function isVideoOrLiveLink(href: string): boolean {
 
   return (
     /\/videos\//.test(url.pathname) ||
-    /^\/reel\//.test(url.pathname) ||
+    // /^\/reel\/[^/]/ exige un id después de "/reel/" — "/reel/?s=tab" (el
+    // link genérico de la pestaña "Reels" de la navegación de Facebook, sin
+    // ningún id) matcheaba con /^\/reel\// sola y se colaba como si fuera una
+    // publicación puntual — confirmado con evidencia real en un volcado.
+    /^\/reel\/[^/]/.test(url.pathname) ||
     (/^\/watch\/?$/.test(url.pathname) && url.searchParams.has("v"))
   );
 }
 
-/** /share/p/{code}/ y /share/{code}/ — links de "publicación compartida", con un código opaco sin id de página. */
+// /share/{code}/, /share/p/{code}/, /share/r/{code}/ (reel compartido),
+// /share/v/{code}/ (video compartido) — todos son "publicación compartida",
+// con un código opaco sin id de página. Confirmado con evidencia real: una
+// página que resharea seguido usa los 4 formatos mezclados, y solo reconocer
+// "p" (o ninguno) hacía que el resto quedara invisible para el filtro,
+// saltándose publicaciones reales en el medio del feed.
 function isShareLinkPath(pathname: string): boolean {
-  return /^\/share\/(?:p\/)?[a-zA-Z0-9]+\/?$/.test(pathname);
+  return /^\/share\/(?:[a-z]+\/)?[a-zA-Z0-9_-]+\/?$/.test(pathname);
 }
 
 /** Saca el identificador de página/perfil (slug o id numérico) de una URL de página ya validada. */
@@ -93,18 +113,42 @@ function extractPageSegment(pageUrl: string): string | null {
 
 /**
  * Igual que exigir que el link contenga el id/slug de la página (para
- * descartar contenido de otra página) — salvo para /share/..., que son
- * códigos opacos sin ningún id de página en la URL, así que para esos
- * confiamos en que ya vinieron escaneados dentro del feed/main de la propia
- * página (o del JSON filtrado a mano).
+ * descartar contenido de otra página) — salvo tres casos que son
+ * códigos/ids "planos" sin ningún id de página en la URL:
+ *   - /share/...: código opaco de "publicación compartida".
+ *   - /reel/{id}/: los reels usan un namespace global, nunca llevan el slug
+ *     de la página en el path.
+ *   - /photo/?fbid=...: el permalink real de una publicación de solo-foto
+ *     tampoco lleva el slug de la página.
+ * Confirmado con evidencia real en los tres casos (reels y fotos de
+ * "Colegio La Salle Juliaca" que el usuario dio, verificados uno por uno
+ * contra el volcado real: ninguno tenía "colegiolasallejuliaca" en su URL,
+ * se rechazaban siempre). Para estos tres casos confiamos en que ya
+ * vinieron escaneados dentro del feed/main de la propia página (o del JSON
+ * filtrado a mano).
  */
 function belongsToPage(href: string, pageSegment: string | null): boolean {
   if (!pageSegment) return true;
+
+  let pathname: string;
+  let url: URL;
   try {
-    if (isShareLinkPath(new URL(href, "https://www.facebook.com").pathname)) return true;
+    url = new URL(href, "https://www.facebook.com");
+    pathname = url.pathname;
   } catch {
     return false;
   }
+
+  if (isShareLinkPath(pathname)) return true;
+  if (/^\/reel\/[^/]/.test(pathname)) return true;
+  if (
+    /^\/photo\/?$/.test(pathname) &&
+    url.searchParams.has("fbid") &&
+    (url.searchParams.get("set") ?? "").startsWith("a.")
+  ) {
+    return true;
+  }
+
   return href.includes(pageSegment);
 }
 
@@ -140,11 +184,18 @@ function canonicalizePostLink(href: string): string {
 
 // Facebook renderiza el feed de forma perezosa: al cargar la página solo
 // aparecen los primeros 1-3 posts en el DOM, el resto se agrega recién
-// cuando el usuario scrollea (confirmado con evidencia real: pedir 10 solo
-// devolvía 1, porque nunca forzábamos la carga de más). Un scroll real de
-// mouse dispara ese lazy-load; un scrollTop/scrollIntoView no siempre lo hace.
-const MAX_SCROLL_ATTEMPTS = 8;
-const SCROLL_WAIT_MS = 1_500;
+// cuando el usuario scrollea. Un salto de distancia grande (sea uno fijo de
+// 3000px, o el "saltar hasta el último post conocido" que probamos después)
+// deja que Facebook cargue varios posts de golpe en una sola tanda — y ahí
+// no hay garantía de que el orden en que esos posts se insertan en el DOM
+// coincida con el orden real del feed (visual, de arriba hacia abajo). En
+// vez de eso, scrolleamos en pasos CHICOS y seguidos (como un scroll real de
+// mouse), dejando que el feed cargue de a poco — así el orden de inserción
+// en el DOM tiene más chances de coincidir con el orden visual real.
+const MAX_SCROLL_ATTEMPTS = 20;
+const SMALL_SCROLL_STEPS = 6;
+const SMALL_SCROLL_PX = 350;
+const SMALL_SCROLL_WAIT_MS = 250;
 
 /**
  * Fuente principal: junta, en el mismo orden en que aparecen en pantalla,
@@ -154,23 +205,22 @@ const SCROLL_WAIT_MS = 1_500;
  * feed/main. Espera a que el feed tenga AL MENOS un link (no específicamente
  * [role="article"]: las páginas de video/en vivo pueden no usar ese role en
  * absoluto, y exigirlo hacía que esta búsqueda nunca encontrara nada ahí).
- * Scrollea (con esperas entre cada intento) hasta juntar `limit` o agotar
- * los intentos, si la fuente tiene menos publicaciones que eso.
  */
 async function collectLatestPostLinksFromDom(
   page: Page,
   pageUrl: string,
   limit: number,
+  seen: Set<string> = new Set(),
+  results: string[] = [],
 ): Promise<string[]> {
   const pageSegment = extractPageSegment(pageUrl);
-  const seen = new Set<string>();
-  const results: string[] = [];
+  const allHrefsEverSeen = new Set<string>();
 
   for (const containerSelector of ['[role="feed"]', '[role="main"]']) {
     const container = page.locator(containerSelector).first();
+    const anchors = container.locator("a[href]");
 
-    const ready = await container
-      .locator("a[href]")
+    const ready = await anchors
       .first()
       .waitFor({ state: "attached", timeout: 15_000 })
       .then(() => true)
@@ -178,81 +228,168 @@ async function collectLatestPostLinksFromDom(
 
     if (!ready) continue;
 
-    for (let attempt = 0; attempt <= MAX_SCROLL_ATTEMPTS; attempt++) {
-      const hrefs = await container
-        .locator("a[href]")
-        .evaluateAll((anchors) => anchors.map((anchor) => (anchor as HTMLAnchorElement).href))
-        .catch(() => [] as string[]);
+    const resultsBeforeThisContainer = results.length;
 
-      for (const href of hrefs) {
+    for (let attempt = 0; attempt <= MAX_SCROLL_ATTEMPTS; attempt++) {
+      // Ojo: evaluateAll() devuelve los elementos en orden del DOCUMENTO, no
+      // necesariamente en orden VISUAL — si Facebook virtualiza el feed
+      // reciclando/reposicionando elementos con CSS (transform/translate) en
+      // vez de insertarlos en el árbol en el orden real, el orden del
+      // documento puede no coincidir con el orden en pantalla. Para no
+      // confiar ciegamente en eso, traemos también la posición vertical real
+      // de cada anchor (relativa a toda la página, sumando el scroll actual)
+      // y ordenamos por ahí antes de decidir cuál es "el siguiente".
+      const anchorData = await anchors
+        .evaluateAll((els) =>
+          els
+            .map((el) => {
+              const rect = el.getBoundingClientRect();
+              return {
+                href: (el as HTMLAnchorElement).getAttribute("href") ?? "",
+                top: rect.top + window.scrollY,
+                // Un elemento oculto (display:none, o un padre colapsado)
+                // devuelve un rect de puros ceros — eso lo ordenaría como si
+                // estuviera arriba de todo, dando un orden falso. Se
+                // descartan acá directamente.
+                visible: rect.width > 0 && rect.height > 0,
+              };
+            })
+            .filter((a) => a.visible),
+        )
+        .catch(() => [] as { href: string; top: number; visible: boolean }[]);
+
+      anchorData.sort((a, b) => a.top - b.top);
+
+      for (const { href } of anchorData) if (href) allHrefsEverSeen.add(href);
+
+      let newMatchesThisPass = 0;
+
+      for (const { href } of anchorData) {
         if (results.length >= limit) break;
-        if (!(isNormalPostLink(href) || isVideoOrLiveLink(href))) continue;
+        if (!href || !(isNormalPostLink(href) || isVideoOrLiveLink(href))) continue;
         if (!belongsToPage(href, pageSegment)) continue;
 
         const canonical = canonicalizePostLink(href);
-        if (seen.has(canonical)) continue;
-        seen.add(canonical);
-        results.push(canonical);
+        if (!seen.has(canonical)) {
+          seen.add(canonical);
+          results.push(canonical);
+          newMatchesThisPass += 1;
+        }
+      }
+
+      console.info(
+        `[Facebook] scroll ${attempt}/${MAX_SCROLL_ATTEMPTS} (${containerSelector}): ${anchorData.length} links en el DOM, ${newMatchesThisPass} publicación(es) nueva(s) — total ${results.length}/${limit}`,
+      );
+
+      if (attempt === 0 && results.length === 0) {
+        // El primer vistazo (sin scrollear todavía) no reconoció NADA — eso es
+        // sospechoso, ahí debería estar el post más reciente. Volcamos los
+        // hrefs crudos (ya ordenados por posición real) + la página completa
+        // para ver con evidencia real qué se está descartando, en vez de
+        // seguir adivinando.
+        console.info(
+          "[Facebook] hrefs del primer intento (sin match, ordenados por posición):",
+          JSON.stringify(anchorData, null, 2),
+        );
+        await dumpDebugPage(page, "first-attempt-no-match");
       }
 
       if (results.length >= limit || attempt === MAX_SCROLL_ATTEMPTS) break;
 
-      await page.mouse.wheel(0, 3_000);
-      await page.waitForTimeout(SCROLL_WAIT_MS);
+      // Varios pasos chicos y seguidos en vez de un salto grande de una sola
+      // vez (ni "saltar al último conocido" ni un empujón grande) — así el
+      // feed carga de a poco, en vez de en una tanda grande donde el orden
+      // de inserción en el DOM puede no coincidir con el orden visual real.
+      for (let step = 0; step < SMALL_SCROLL_STEPS; step++) {
+        await page.mouse.wheel(0, SMALL_SCROLL_PX);
+        await page.waitForTimeout(SMALL_SCROLL_WAIT_MS);
+      }
     }
 
-    if (results.length > 0) break;
+    if (results.length > resultsBeforeThisContainer) break;
   }
+
+  // Diagnóstico: TODOS los href vistos durante todo el proceso (matcheen o
+  // no), para poder confirmar si un link esperado apareció en algún momento
+  // del scroll y por qué no se reconoció, en vez de asumir que nunca cargó.
+  console.info(
+    `[Facebook] Todos los <a href> vistos durante el scroll (${allHrefsEverSeen.size}):`,
+    JSON.stringify([...allHrefsEverSeen], null, 2),
+  );
+  await dumpDebugPage(page, "scroll-finished");
 
   return results;
 }
 
 /**
- * Último recurso si no hay ningún <a href> utilizable en el DOM: Facebook
- * también embebe el permalink en el JSON de hidratación del HTML inicial.
- * Riesgoso — confirmado con casos reales: ese mismo JSON puede traer el
- * permalink de una publicación de OTRA página (un banner tipo "alguien que
- * seguís está en vivo ahora") o de una publicación VIEJA de la MISMA página
- * (no necesariamente la más reciente) — por eso solo se usa cuando el DOM no
- * dio ningún resultado, exige que el link pertenezca a la página pedida, y
- * solo puede devolver UN resultado confiable (no hay orden garantizado para
- * armar una lista de varios).
+ * El primer post de una página recién cargada a veces NO tiene ningún
+ * <a href> real todavía — confirmado con evidencia real (volcado real de
+ * "Colegio La Salle Juliaca"): el post visible en pantalla ("Santa Rosa de
+ * Lima") no tenía NINGÚN <a href> en todo el documento apuntando a él; su
+ * timestamp vivía dentro de un <div hidden> de ayuda interna, no en un link
+ * clickeable. Por eso el DOM solo (collectLatestPostLinksFromDom) puede
+ * arrancar en blanco para el post #1 específicamente, aunque para el resto
+ * (posts #2+, ya cargados de forma perezosa con href real) funcione bien.
+ *
+ * Pero SÍ existe en el JSON de la consulta GraphQL del feed
+ * ("user":{"id":"<pageId>","timeline_list_feed_units":{"edges":[{"node":{...
+ * "post_id":"<postId>"...) — a diferencia del "permalink_url" que se usaba
+ * antes (buscado sin ningún orden garantizado en todo el documento, y que
+ * en la práctica trajo contenido incorrecto las tres veces que se activó),
+ * esta estructura ES la lista ORDENADA real que Facebook usa para pintar el
+ * timeline: edges[0] es, con evidencia de su propio nombre en el código de
+ * Facebook, el primer elemento de esa lista — no un fallback ambiguo.
  */
-async function findPermalinkFromEmbeddedJson(
-  page: Page,
-  pageUrl: string,
-  isMatch: (href: string) => boolean,
-): Promise<string | null> {
-  const html = await page.content();
-  const pageSegment = extractPageSegment(pageUrl);
+function findFirstPostFromTimelineJson(html: string): string | null {
+  const marker = '"timeline_list_feed_units":{"edges":[{"node":{';
+  const markerIndex = html.indexOf(marker);
+  if (markerIndex === -1) return null;
 
-  const re = /"permalink_url":"([^"]+)"/g;
-  let match: RegExpExecArray | null;
+  const before = html.slice(Math.max(0, markerIndex - 60), markerIndex);
+  const pageIdMatch = before.match(/"id":"(\d+)",$/);
+  if (!pageIdMatch) return null;
 
-  while ((match = re.exec(html))) {
-    const href = match[1].replace(/\\\//g, "/");
-    if (!belongsToPage(href, pageSegment)) continue;
-    if (isMatch(href)) return href;
-  }
+  const after = html.slice(markerIndex, markerIndex + 3_000);
+  const postIdMatch = after.match(/"post_id":"(\d+)"/);
+  if (!postIdMatch) return null;
 
-  return null;
+  return `https://www.facebook.com/permalink.php?story_fbid=${postIdMatch[1]}&id=${pageIdMatch[1]}`;
 }
 
 /**
- * "Obtener el/los último(s) post(s), y de ahí seguir las reglas": el DOM
- * (orden real de pantalla) es la fuente confiable; el JSON embebido es el
- * último recurso, y ahí sí respetamos la prioridad normal→video como
- * excepción condicional (nunca al revés) porque no tiene orden garantizado.
+ * "Obtener el/los último(s) post(s), y de ahí seguir las reglas": primero se
+ * intenta conseguir el post #1 desde el JSON ordenado del feed (ver arriba
+ * por qué esta fuente puntual sí es confiable, a diferencia del
+ * "permalink_url" genérico que se sacó por completo del código). El resto
+ * (o el #1 también, si el JSON no lo tenía) se completa con el DOM, que ya
+ * funciona bien para contenido cargado de forma perezosa.
  */
 async function collectLatestPostLinks(page: Page, pageUrl: string, limit: number): Promise<string[]> {
-  const fromDom = await collectLatestPostLinksFromDom(page, pageUrl, limit);
-  if (fromDom.length > 0) return fromDom;
+  const seen = new Set<string>();
+  const results: string[] = [];
 
-  const fallback =
-    (await findPermalinkFromEmbeddedJson(page, pageUrl, isNormalPostLink)) ??
-    (await findPermalinkFromEmbeddedJson(page, pageUrl, isVideoOrLiveLink));
+  const html = await page.content();
+  const firstFromJson = findFirstPostFromTimelineJson(html);
 
-  return fallback ? [canonicalizePostLink(fallback)] : [];
+  // Ojo: NO pasa por belongsToPage() acá a propósito. Ese chequeo compara
+  // contra el slug de la URL configurada (ej. "colegiolasallejuliaca"), pero
+  // findFirstPostFromTimelineJson arma el link con el id NUMÉRICO de la
+  // página (ej. "100063766611192") — nunca van a coincidir como texto,
+  // aunque sean la misma página. Confirmado con evidencia real: por este
+  // motivo se estaba descartando en silencio el post correcto. No hace
+  // falta ese chequeo igual: el id numérico salió del propio "user.id" que
+  // encabeza esta consulta puntual, no de una búsqueda ciega — ya está
+  // scopeado a la página correcta por construcción.
+  if (firstFromJson) {
+    const canonical = canonicalizePostLink(firstFromJson);
+    seen.add(canonical);
+    results.push(canonical);
+    console.info(`[Facebook] Primer post obtenido del JSON ordenado del feed: ${canonical}`);
+  }
+
+  if (results.length >= limit) return results;
+
+  return collectLatestPostLinksFromDom(page, pageUrl, limit, seen, results);
 }
 
 async function guardNavigation(page: Page) {
@@ -477,15 +614,19 @@ export async function getLatestPagePost(input: unknown) {
  * ya está guardado — acá simplemente se devuelve la lista, en el mismo
  * orden (más reciente primero) en que aparecen en el timeline.
  */
-export async function getLatestPagePosts(input: unknown, limit = 10): Promise<FacebookPost[]> {
+export async function getLatestPagePosts(
+  input: unknown,
+  limit = 10,
+  headless = true,
+): Promise<FacebookPost[]> {
   const requestedUrl = normalizeFacebookPageUrl(input);
 
   if (!(await hasStoredSession())) {
     throw new FacebookError("SESSION_REQUIRED", "Necesitas iniciar sesión en Facebook.", 401);
   }
 
-  console.info("[Facebook] Opening page...");
-  return withFacebookContext<FacebookPost[]>(true, async (context) => {
+  console.info(`[Facebook] Opening page... (headless=${headless})`);
+  return withFacebookContext<FacebookPost[]>(headless, async (context) => {
     const page = await openFacebookPage(context, requestedUrl);
 
     console.info(`[Facebook] Page opened successfully, looking for up to ${limit} recent posts...`);
@@ -500,10 +641,20 @@ export async function getLatestPagePosts(input: unknown, limit = 10): Promise<Fa
       );
     }
 
+    console.info(`[Facebook] ★★★ PRIMER POST detectado (posición 0 de ${permalinks.length}): ${permalinks[0]} ★★★`);
+    console.info(`[Facebook] Lista completa de permalinks detectados: ${JSON.stringify(permalinks, null, 2)}`);
+
     const posts: FacebookPost[] = [];
-    for (const permalink of permalinks) {
+    for (const [index, permalink] of permalinks.entries()) {
       const post = await extractPostAtPermalink(page, permalink, requestedUrl);
-      if (post) posts.push(post);
+      if (post) {
+        posts.push(post);
+        if (index === 0) {
+          console.info(
+            `[Facebook] ★★★ PRIMER POST extraído — autor: "${post.author.name ?? "(sin autor)"}", texto: "${(post.text ?? "").slice(0, 80)}${(post.text?.length ?? 0) > 80 ? "..." : ""}", url final: ${post.url} ★★★`,
+          );
+        }
+      }
     }
 
     return posts;

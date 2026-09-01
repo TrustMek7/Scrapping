@@ -89,7 +89,10 @@ export default function MonitoringAlerts() {
 
   const loadRecentPublications = () => {
     fetchRecentPublications()
-      .then(setRecentPublications)
+      .then((data) => {
+        console.log("[fetchRecentPublications] respuesta del backend:", data);
+        setRecentPublications(data);
+      })
       .catch(() => undefined);
   };
 
@@ -147,11 +150,15 @@ export default function MonitoringAlerts() {
     }
   };
 
-  const handleCheckSource = async () => {
+  const handleCheckSource = async (headless = true) => {
     if (!selectedSourceId) return;
     setChecking(true);
     try {
-      const outcomes = await checkFacebookSource(selectedSourceId, postLimit);
+      const outcomes = await checkFacebookSource(selectedSourceId, postLimit, headless);
+      console.log("[checkFacebookSource] respuesta del backend:", outcomes);
+      if (outcomes[0]) {
+        console.log("★★★ [checkFacebookSource] PRIMER POST (posición 0):", outcomes[0]);
+      }
       const newOnes = outcomes.filter((o) => o.ok && !o.deduplicated);
       const alerts = newOnes.filter((o) => o.alertCreated).length;
       const skipped = outcomes.filter((o) => !o.ok).length;
@@ -180,6 +187,7 @@ export default function MonitoringAlerts() {
     setCheckingAll(true);
     try {
       const results = await checkAllFacebookSources(postLimit);
+      console.log("[checkAllFacebookSources] respuesta del backend:", results);
       const newPublications = results.reduce((sum, r) => sum + (r.newPublications ?? 0), 0);
       const newAlerts = results.reduce((sum, r) => sum + (r.newAlerts ?? 0), 0);
       const failed = results.filter((r) => !r.ok).length;
@@ -403,10 +411,18 @@ const handleExportRecentPublications = async () => {
             </div>
             <Button
               size="sm"
-              onClick={handleCheckSource}
+              onClick={() => handleCheckSource(true)}
               disabled={checking || checkingAll || sessionStatus !== "active" || !selectedSourceId}
             >
               {checking ? "Revisando..." : "Revisar publicaciones nuevas"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => handleCheckSource(false)}
+              disabled={checking || checkingAll || sessionStatus !== "active" || !selectedSourceId}
+            >
+              {checking ? "Revisando..." : "Ver en vivo (debug)"}
             </Button>
             <Button
               size="sm"

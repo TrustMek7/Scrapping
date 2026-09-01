@@ -10,38 +10,51 @@ export const FACEBOOK_SESSION_DIR = path.join(
   process.env.FACEBOOK_SESSION_PROFILE ?? "default",
 );
 
-let browserInUse = false;
-let lockAcquiredAt: number | null = null;
+// El login manual puede tardar hasta LOGIN_TIMEOUT_MS (10 min, ver session.ts)
+// sosteniendo el navegador legítimamente — el margen de cada operación en
+// cola tiene que cubrir eso.
+const OPERATION_TIMEOUT_MS = 11 * 60 * 1000;
 
-// El login manual puede tardar hasta LOGIN_TIMEOUT_MS (10 min, ver session.ts) sosteniendo
-// el candado legítimamente. Si sigue trabado más que eso, es que algo se colgó (ej. el
-// proceso se reinició a mitad de una operación) — mejor auto-liberarlo que exigir un
-// reinicio manual del backend cada vez que pasa.
-const STALE_LOCK_MS = 11 * 60 * 1000;
+let queueTail: Promise<void> = Promise.resolve();
 
-export async function runWithBrowserLock<T>(operation: () => Promise<T>) {
-  if (browserInUse) {
-    const heldForMs = lockAcquiredAt ? Date.now() - lockAcquiredAt : Infinity;
-    if (heldForMs < STALE_LOCK_MS) {
-      throw new FacebookError(
-        "BROWSER_ERROR",
-        "El navegador está ocupado. Espera a que termine la operación actual.",
-        409,
-      );
-    }
-    console.warn(
-      `[Facebook] El candado del navegador llevaba trabado ${Math.round(heldForMs / 1000)}s — se libera solo y se reintenta.`,
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout>;
+
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(
+      () =>
+        reject(
+          new FacebookError(
+            "BROWSER_ERROR",
+            "La operación de Facebook tardó demasiado y se canceló.",
+            504,
+          ),
+        ),
+      ms,
     );
-  }
+  });
 
-  browserInUse = true;
-  lockAcquiredAt = Date.now();
-  try {
-    return await operation();
-  } finally {
-    browserInUse = false;
-    lockAcquiredAt = null;
-  }
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutHandle));
+}
+
+/**
+ * Cola FIFO en vez de "el navegador está ocupado, reintentá vos": si ya hay
+ * una operación de Facebook en curso, la nueva simplemente espera su turno.
+ * Importante para "revisar todas las fuentes" — antes, una fuente podía
+ * fallar por encontrar el candado ocupado por otra operación concurrente
+ * (ej. la revisión automática horaria disparándose al mismo tiempo). Cada
+ * operación individual tiene un tiempo máximo (mismo margen que el login
+ * manual) para que una que se cuelgue no bloquee la cola para siempre.
+ */
+export function runWithBrowserLock<T>(operation: () => Promise<T>): Promise<T> {
+  const run = queueTail.then(() => withTimeout(operation(), OPERATION_TIMEOUT_MS));
+  // La cola sigue pase lo que pase (éxito o error) — nunca se traba por el
+  // fallo de una operación individual.
+  queueTail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
 }
 
 export function withFacebookContext<T>(
