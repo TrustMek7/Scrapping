@@ -44,6 +44,39 @@ export interface AlertListItem {
 
 export const fetchAlerts = () => request<AlertListItem[]>("/alerts");
 
+export interface MailTestConfig {
+  configured: boolean;
+  hasGmailUser: boolean;
+  hasAppPassword: boolean;
+  hasRecipient: boolean;
+  recipient: string | null;
+  mode: "LIVE" | "DRY_RUN";
+}
+
+export interface TestEmailPayload {
+  entityName: string;
+  category: string;
+  severity: string;
+  confidence: number;
+  summary: string;
+  sourceName: string;
+  publicationTitle: string;
+  publicationUrl: string;
+  recipientEmail?: string;
+}
+
+export const fetchMailTestConfig = () => request<MailTestConfig>("/alerts/test/config");
+export const sendTestEmail = (payload: TestEmailPayload) =>
+  request<{ ok: boolean; sentTo: string; mode: string }>("/alerts/test/email", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+export const sendManualAlertTest = (payload: TestEmailPayload) =>
+  request<{ ok: boolean; sentTo: string; mode: string }>("/alerts/test/manual-alert", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
 export interface SourceItem {
   id: string;
   name: string;

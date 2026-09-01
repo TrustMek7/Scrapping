@@ -24,16 +24,21 @@ import {
   fetchAlerts,
   fetchAutoCheckStatus,
   fetchFacebookSession,
+  fetchMailTestConfig,
   fetchRecentPublications,
   fetchSources,
   loginFacebook,
   logoutFacebook,
+  sendManualAlertTest,
+  sendTestEmail,
   setAutoCheck,
   type AlertListItem,
   type AutoCheckStatus,
   type FacebookSessionStatus,
+  type MailTestConfig,
   type RecentPublicationItem,
   type SourceItem,
+  type TestEmailPayload,
 } from "../../lib/api";
 import type { Severity } from "@scrapping/shared";
 
@@ -72,6 +77,19 @@ export default function MonitoringAlerts() {
   const [postLimit, setPostLimit] = useState(10);
   const [autoCheck, setAutoCheckState] = useState<AutoCheckStatus | null>(null);
   const [autoCheckPending, setAutoCheckPending] = useState(false);
+  const [mailConfig, setMailConfig] = useState<MailTestConfig | null>(null);
+  const [sendingTestEmail, setSendingTestEmail] = useState(false);
+  const [testEmailForm, setTestEmailForm] = useState<TestEmailPayload>({
+    entityName: "",
+    category: "DENUNCIA",
+    severity: "HIGH",
+    confidence: 0.9,
+    summary: "Publicación de prueba para validar el envío de alertas por correo.",
+    sourceName: "Prueba manual",
+    publicationTitle: "Publicación de prueba",
+    publicationUrl: "https://example.com/publicacion-prueba",
+    recipientEmail: "",
+  });
 
   const load = () => {
     setLoading(true);
@@ -107,7 +125,54 @@ export default function MonitoringAlerts() {
     fetchAutoCheckStatus()
       .then(setAutoCheckState)
       .catch(() => undefined);
+    fetchMailTestConfig()
+      .then(setMailConfig)
+      .catch(() => undefined);
   }, []);
+
+  const applyPublicationToTest = (publication: RecentPublicationItem) => {
+    setTestEmailForm((prev) => ({
+      ...prev,
+      sourceName: publication.source.name,
+      publicationTitle: publication.title,
+      publicationUrl: publication.url,
+      summary:
+        publication.analysis?.summary ||
+        prev.summary ||
+        "Publicación cargada desde el historial para prueba de correo.",
+    }));
+  };
+
+  const handleTestEmailChange = (field: keyof TestEmailPayload, value: string | number) => {
+    setTestEmailForm((prev) => ({
+      ...prev,
+      [field]: value,
+    }));
+  };
+
+  const sendTestAlert = async (mode: "email" | "manual-alert") => {
+    setSendingTestEmail(true);
+    try {
+      const payload = {
+        ...testEmailForm,
+        confidence: Number(testEmailForm.confidence),
+        recipientEmail: testEmailForm.recipientEmail?.trim() || undefined,
+      };
+      const response =
+        mode === "email"
+          ? await sendTestEmail(payload)
+          : await sendManualAlertTest(payload);
+      toast.success(
+        mode === "email"
+          ? `Correo de prueba enviado a ${response.sentTo}.`
+          : `Alerta simulada enviada a ${response.sentTo}.`,
+      );
+    } catch (err) {
+      toast.error((err as Error).message);
+    } finally {
+      setSendingTestEmail(false);
+    }
+  };
 
   const handleToggleAutoCheck = async () => {
     setAutoCheckPending(true);
@@ -438,6 +503,153 @@ const handleExportRecentPublications = async () => {
               No hay fuentes de tipo Facebook activas — creá una en{" "}
               <a href="/monitoreo/fuentes" className="text-brand-500 hover:underline">Fuentes</a>.
             </p>
+          )}
+        </ComponentCard>
+
+        <ComponentCard title="Prueba de correo / alerta manual">
+          <div className="mb-4 flex flex-wrap items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
+            <span>
+              Estado de mail: <strong>{mailConfig?.configured ? "configurado" : "sin configuración"}</strong>
+            </span>
+            {mailConfig?.recipient && (
+              <span>Destinatario global: {mailConfig.recipient}</span>
+            )}
+          </div>
+
+          <div className="grid gap-4 lg:grid-cols-2">
+            <div className="space-y-3">
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Entidad</label>
+                <Input
+                  value={testEmailForm.entityName}
+                  onChange={(e) => handleTestEmailChange("entityName", e.target.value)}
+                  placeholder="Ej.: Ministerio de Salud"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Categoría</label>
+                  <select
+                    className="h-11 w-full rounded-lg border border-gray-300 bg-transparent px-4 py-2.5 text-sm text-gray-800 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90"
+                    value={testEmailForm.category}
+                    onChange={(e) => handleTestEmailChange("category", e.target.value)}
+                  >
+                    <option value="DENUNCIA">DENUNCIA</option>
+                    <option value="SCANDAL">SCANDAL</option>
+                    <option value="ALLEGATION">ALLEGATION</option>
+                    <option value="COMPLAINT">COMPLAINT</option>
+                    <option value="OTHER_RELEVANT">OTHER_RELEVANT</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Severidad</label>
+                  <select
+                    className="h-11 w-full rounded-lg border border-gray-300 bg-transparent px-4 py-2.5 text-sm text-gray-800 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90"
+                    value={testEmailForm.severity}
+                    onChange={(e) => handleTestEmailChange("severity", e.target.value)}
+                  >
+                    <option value="HIGH">HIGH</option>
+                    <option value="MEDIUM">MEDIUM</option>
+                    <option value="LOW">LOW</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Confianza</label>
+                <Input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={testEmailForm.confidence}
+                  onChange={(e) => handleTestEmailChange("confidence", Number(e.target.value))}
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Email de prueba (opcional)</label>
+                <Input
+                  type="email"
+                  value={testEmailForm.recipientEmail}
+                  onChange={(e) => handleTestEmailChange("recipientEmail", e.target.value)}
+                  placeholder="mail@ejemplo.com"
+                />
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Fuente</label>
+                <Input
+                  value={testEmailForm.sourceName}
+                  onChange={(e) => handleTestEmailChange("sourceName", e.target.value)}
+                  placeholder="Fuente"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Título de la publicación</label>
+                <Input
+                  value={testEmailForm.publicationTitle}
+                  onChange={(e) => handleTestEmailChange("publicationTitle", e.target.value)}
+                  placeholder="Título"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">URL</label>
+                <Input
+                  type="text"
+                  value={testEmailForm.publicationUrl}
+                  onChange={(e) => handleTestEmailChange("publicationUrl", e.target.value)}
+                  placeholder="https://example.com"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300">Resumen</label>
+                <textarea
+                  value={testEmailForm.summary}
+                  onChange={(e) => handleTestEmailChange("summary", e.target.value)}
+                  rows={4}
+                  className="w-full rounded-lg border border-gray-300 bg-transparent px-4 py-2.5 text-sm text-gray-800 shadow-theme-xs placeholder:text-gray-400 focus:border-brand-300 focus:outline-hidden focus:ring-3 focus:ring-brand-500/10 dark:border-gray-700 dark:bg-gray-900 dark:text-white/90 dark:placeholder:text-white/30"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <Button size="sm" onClick={() => sendTestAlert("email")} disabled={sendingTestEmail}>
+              {sendingTestEmail ? "Enviando..." : "Enviar correo de prueba"}
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => sendTestAlert("manual-alert")} disabled={sendingTestEmail}>
+              Simular alerta manual
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                const publication = recentPublications[0];
+                if (publication) applyPublicationToTest(publication);
+              }}
+              disabled={recentPublications.length === 0}
+            >
+              Cargar última publicación revisada
+            </Button>
+          </div>
+
+          {recentPublications.length > 0 && (
+            <div className="mt-4">
+              <p className="mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">Elegir publicación para prueba</p>
+              <div className="flex flex-wrap gap-2">
+                {recentPublications.slice(0, 5).map((publication) => (
+                  <button
+                    key={publication.id}
+                    type="button"
+                    onClick={() => applyPublicationToTest(publication)}
+                    className="rounded-full border border-gray-200 bg-gray-50 px-3 py-1.5 text-xs text-gray-700 hover:border-brand-300 hover:text-brand-500 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300"
+                  >
+                    {publication.source.name}
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
         </ComponentCard>
 

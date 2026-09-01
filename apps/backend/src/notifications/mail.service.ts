@@ -11,6 +11,7 @@ export interface AlertEmailInput {
   sourceName: string;
   publicationTitle: string;
   publicationUrl: string;
+  recipientEmail?: string;
 }
 
 @Injectable()
@@ -20,6 +21,10 @@ export class MailService {
   private warnedMissingConfig = false;
 
   constructor(private readonly config: ConfigService) {}
+
+  isConfigured(): boolean {
+    return !!this.config.get<string>("GMAIL_USER") && !!this.config.get<string>("GMAIL_APP_PASSWORD") && !!this.config.get<string>("EMAIL_TO");
+  }
 
   private getTransporter(): nodemailer.Transporter | null {
     const user = this.config.get<string>("GMAIL_USER");
@@ -53,10 +58,11 @@ export class MailService {
 
     const user = this.config.get<string>("GMAIL_USER");
     const from = this.config.get<string>("EMAIL_FROM") || user;
-    const to = this.config.get<string>("EMAIL_TO");
+    const to = input.recipientEmail ?? this.config.get<string>("EMAIL_TO");
+    if (!to) return;
 
     try {
-      await transporter.sendMail({
+      const info = await transporter.sendMail({
         from: `Alertas Nación <${from}>`,
         to,
         subject: `🚨 Alerta ${input.severity} — ${input.entityName} (${input.category})`,
@@ -73,7 +79,14 @@ export class MailService {
           `Enlace: ${input.publicationUrl}`,
         ].join("\n"),
       });
-      this.logger.log(`[MAIL] correo de alerta enviado a ${to}`);
+
+      this.logger.log(`[MAIL] SMTP accepted: ${JSON.stringify({
+        to,
+        accepted: info.accepted ?? [],
+        rejected: info.rejected ?? [],
+        response: info.response,
+        messageId: info.messageId,
+      })}`);
     } catch (error) {
       this.logger.error(`[MAIL] no se pudo enviar el correo de alerta: ${(error as Error).message}`);
     }

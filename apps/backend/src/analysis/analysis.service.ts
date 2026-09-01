@@ -98,7 +98,7 @@ export class AnalysisService {
     const monitoredEntities = monitoredEntitiesRaw.map((e) => ({
       id: e.id,
       name: e.name,
-      aliases: e.aliases,
+      aliases: this.normalizeAliases(e.aliases),
     }));
 
     const source = await this.prisma.source.findUniqueOrThrow({ where: { id: input.sourceId } });
@@ -200,7 +200,12 @@ export class AnalysisService {
 
   private async loadMonitoredEntities(): Promise<MonitoredEntityInput[]> {
     const entities = await this.prisma.monitoredEntity.findMany();
-    return entities.map((e) => ({ name: e.name, aliases: e.aliases }));
+    return entities.map((e) => ({ name: e.name, aliases: this.normalizeAliases(e.aliases) }));
+  }
+
+  private normalizeAliases(aliases: unknown): string[] {
+    if (!Array.isArray(aliases)) return [];
+    return aliases.filter((alias): alias is string => typeof alias === "string");
   }
 
   private async linkMatchedEntities(
