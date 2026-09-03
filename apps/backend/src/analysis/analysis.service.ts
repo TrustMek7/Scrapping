@@ -146,6 +146,43 @@ export class AnalysisService {
     return { publication, analysis, alert, deduplicated: false };
   }
 
+  /** Guarda publicaciones multimedia que no tienen texto extraíble sin enviarlas a la IA. */
+  async persistWithoutText(input: RunAnalysisInput) {
+    const contentHash = createHash("sha256").update(`no-text:${input.url}`).digest("hex");
+    const existing = await this.prisma.publication.findUnique({ where: { contentHash } });
+
+    if (existing) {
+      return {
+        publication: existing,
+        analysis: await this.prisma.analysis.findUnique({ where: { publicationId: existing.id } }),
+        alert: null,
+        deduplicated: true,
+      };
+    }
+
+    const publication = await this.prisma.publication.create({
+      data: {
+        sourceId: input.sourceId,
+        externalId: input.externalId,
+        title: input.title,
+        content: input.content,
+        url: input.url,
+        contentHash,
+        publishedAt: input.publishedAt,
+        images: (input.images ?? []) as unknown as object,
+      },
+    });
+    const analysis = await this.prisma.analysis.create({
+      data: {
+        publicationId: publication.id,
+        status: "FAILED",
+        error: "La publicación no tiene texto extraíble; todavía no hay OCR o transcripción configurados.",
+      },
+    });
+
+    return { publication, analysis, alert: null, deduplicated: false };
+  }
+
   /**
    * Punto de entrada para conectores externos (ej. PostScope) que extraen una
    * publicación puntual y no conocen el CRUD de fuentes: busca la Source por

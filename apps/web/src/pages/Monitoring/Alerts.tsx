@@ -31,6 +31,7 @@ import {
   setAutoCheck,
   type AlertListItem,
   type AutoCheckStatus,
+  type CheckAllSourcesResultItem,
   type FacebookSessionStatus,
   type RecentPublicationItem,
   type SourceItem,
@@ -69,6 +70,8 @@ export default function MonitoringAlerts() {
   const [loginPending, setLoginPending] = useState(false);
   const [checking, setChecking] = useState(false);
   const [checkingAll, setCheckingAll] = useState(false);
+  const [checkingAllResults, setCheckingAllResults] = useState<CheckAllSourcesResultItem[]>([]);
+  const [checkingAllInitialPublicationCount, setCheckingAllInitialPublicationCount] = useState(0);
   const [postLimit, setPostLimit] = useState(10);
   const [autoCheck, setAutoCheckState] = useState<AutoCheckStatus | null>(null);
   const [autoCheckPending, setAutoCheckPending] = useState(false);
@@ -185,8 +188,16 @@ export default function MonitoringAlerts() {
 
   const handleCheckAll = async () => {
     setCheckingAll(true);
+    setCheckingAllResults([]);
+    setCheckingAllInitialPublicationCount(recentPublications.length);
+    const pollTimer = window.setInterval(() => {
+      fetchAlerts().then(setAlerts).catch(() => undefined);
+      fetchRecentPublications().then(setRecentPublications).catch(() => undefined);
+    }, 2000);
+
     try {
       const results = await checkAllFacebookSources(postLimit);
+      setCheckingAllResults(results);
       console.log("[checkAllFacebookSources] respuesta del backend:", results);
       const newPublications = results.reduce((sum, r) => sum + (r.newPublications ?? 0), 0);
       const newAlerts = results.reduce((sum, r) => sum + (r.newAlerts ?? 0), 0);
@@ -209,6 +220,9 @@ export default function MonitoringAlerts() {
     } catch (err) {
       toast.error((err as Error).message);
     } finally {
+      window.clearInterval(pollTimer);
+      load();
+      loadRecentPublications();
       setCheckingAll(false);
     }
   };
@@ -433,6 +447,22 @@ const handleExportRecentPublications = async () => {
               {checkingAll ? "Revisando todas..." : `Revisar todas (${facebookSources.length})`}
             </Button>
           </div>
+          {checkingAll && (
+            <p className="mt-3 text-sm text-gray-500 dark:text-gray-400">
+              Revisando fuentes... publicaciones nuevas detectadas: {Math.max(0, recentPublications.length - checkingAllInitialPublicationCount)}
+            </p>
+          )}
+          {!checkingAll && checkingAllResults.length > 0 && (
+            <div className="mt-3 space-y-1 text-sm">
+              {checkingAllResults.map((result) => (
+                <p key={result.sourceId} className={result.ok ? "text-gray-500 dark:text-gray-400" : "text-error-500"}>
+                  {result.ok
+                    ? `${result.sourceName}: ${result.newPublications ?? 0} publicación(es) nueva(s), ${result.newAlerts ?? 0} alerta(s)`
+                    : `${result.sourceName}: ${result.error}`}
+                </p>
+              ))}
+            </div>
+          )}
           {facebookSources.length === 0 && (
             <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
               No hay fuentes de tipo Facebook activas — creá una en{" "}

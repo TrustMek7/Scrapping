@@ -84,11 +84,23 @@ export class FacebookService {
 
       for (const post of posts) {
         if (!post.text || post.text.trim().length === 0) {
-          outcomes.push({
+          const result = await this.analysisService.persistWithoutText({
+            sourceId: source.id,
+            title: `Publicación de ${post.author.name ?? source.name}`,
+            content: "",
+            url: post.url,
+            images: post.images,
+          });
+          this.logger.log(
+            `[FACEBOOK] publicación persistida sin texto (deduplicated=${result.deduplicated}, url=${post.url})`,
+          );
+          if (!result.deduplicated) newCount += 1;
+          const outcome = {
             url: post.url,
             ok: false,
             error: "Esta publicación no tiene texto (parece ser solo imagen/video). Todavía no hay OCR configurado.",
-          });
+          } satisfies CheckSourcePostOutcome;
+          outcomes.push(outcome);
           continue;
         }
 
@@ -100,14 +112,15 @@ export class FacebookService {
           images: post.images,
         });
 
-        outcomes.push({
+        const outcome = {
           url: post.url,
           ok: true,
           deduplicated: result.deduplicated,
           relevant: result.analysis?.relevant ?? null,
           category: result.analysis?.category ?? null,
           alertCreated: !!result.alert,
-        });
+        } satisfies CheckSourcePostOutcome;
+        outcomes.push(outcome);
 
         // Ya llegamos a contenido que se procesó en una revisión anterior —
         // todo lo que sigue en el timeline es más viejo todavía. Frenamos acá
@@ -150,7 +163,9 @@ export class FacebookService {
    * misma sesión de navegador). El fallo de una fuente no detiene a las demás
    * — cada resultado (éxito o error) se acumula y se devuelve al final.
    */
-  async checkAllActiveSources(limit = DEFAULT_POST_LIMIT): Promise<CheckAllSourcesResultItem[]> {
+  async checkAllActiveSources(
+    limit = DEFAULT_POST_LIMIT,
+  ): Promise<CheckAllSourcesResultItem[]> {
     const sources = await this.prisma.source.findMany({
       where: { type: "FACEBOOK", status: "ACTIVE" },
     });
@@ -160,17 +175,19 @@ export class FacebookService {
     for (const source of sources) {
       try {
         const outcomes = await this.checkLatestFromSource(source.id, limit);
-        results.push({
+        const result = {
           sourceId: source.id,
           sourceName: source.name,
           ok: true,
           newPublications: outcomes.filter((o) => o.ok && !o.deduplicated).length,
           newAlerts: outcomes.filter((o) => o.alertCreated).length,
-        });
+        } satisfies CheckAllSourcesResultItem;
+        results.push(result);
       } catch (error) {
         const message = error instanceof Error ? error.message : "Error desconocido.";
         this.logger.warn(`[FACEBOOK] falló la revisión de "${source.name}": ${message}`);
-        results.push({ sourceId: source.id, sourceName: source.name, ok: false, error: message });
+        const result = { sourceId: source.id, sourceName: source.name, ok: false, error: message };
+        results.push(result);
       }
     }
 
