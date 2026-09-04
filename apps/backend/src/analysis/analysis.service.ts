@@ -33,6 +33,39 @@ export interface CaptureExternalPostInput {
   externalId?: string;
 }
 
+/**
+ * Normaliza diferencias de presentación que no cambian la publicación:
+ * tipografía matemática/negrita, espacios invisibles y el sufijo de UI
+ * "Ver más" que a veces queda incluido cuando Facebook trunca un caption.
+ */
+function normalizeContentForDedup(content: string): string {
+  return content
+    .normalize("NFKC")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/\u00a0/g, " ")
+    .replace(/(?:…|\.\.\.)?\s*(?:ver más|see more)\s*$/iu, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase("es");
+}
+
+function isDuplicateContent(left: string, right: string): boolean {
+  const normalizedLeft = normalizeContentForDedup(left);
+  const normalizedRight = normalizeContentForDedup(right);
+  if (!normalizedLeft || !normalizedRight) return false;
+  if (normalizedLeft === normalizedRight) return true;
+
+  const [shorter, longer] =
+    normalizedLeft.length <= normalizedRight.length
+      ? [normalizedLeft, normalizedRight]
+      : [normalizedRight, normalizedLeft];
+
+  // Facebook puede devolver solo el encabezado en un tipo de permalink y el
+  // caption completo en otro. Un prefijo de al menos 40 caracteres dentro de
+  // la misma fuente es suficientemente específico para tratarlos como uno.
+  return shorter.length >= 40 && longer.startsWith(shorter);
+}
+
 @Injectable()
 export class AnalysisService {
   private readonly logger = new Logger(AnalysisService.name);
@@ -61,17 +94,35 @@ export class AnalysisService {
    * La IA nunca decide la alerta: solo propone; esta función decide.
    */
   async runAndPersist(input: RunAnalysisInput) {
-    const contentHash = createHash("sha256").update(input.content).digest("hex");
+    const normalizedContent = normalizeContentForDedup(input.content);
+    const contentHash = createHash("sha256")
+      .update(normalizedContent || input.content.trim())
+      .digest("hex");
 
-    const existing = await this.prisma.publication.findUnique({ where: { contentHash } });
+    let existing = await this.prisma.publication.findUnique({ where: { contentHash } });
+    if (!existing) {
+      // Compatibilidad con registros creados antes de usar el hash normalizado
+      // y detección de captions truncados/completos con URLs distintas.
+      const recentFromSameSource = await this.prisma.publication.findMany({
+        where: { sourceId: input.sourceId },
+        orderBy: { createdAt: "desc" },
+        take: 100,
+      });
+      existing =
+        recentFromSameSource.find((publication) =>
+          isDuplicateContent(publication.content, input.content),
+        ) ?? null;
+    }
     if (existing) {
-      this.logger.log(`[SCRAPER] publicación duplicada, se omite (contentHash=${contentHash})`);
+      this.logger.log(
+        `[SCRAPER] publicación duplicada por texto normalizado/prefijo, se omite (existingId=${existing.id})`,
+      );
 
       // El texto es igual, pero la extracción sí volvió a descargar y cachear la
       // imagen (el cache anterior pudo haber expirado o perderse en un reinicio) —
       // sin esto, la publicación se queda apuntando a un link de imagen muerto
       // para siempre, aunque cada revisión haya guardado una copia fresca.
-      const publication = input.images
+      const publication = input.images && input.images.length > 0
         ? await this.prisma.publication.update({
             where: { id: existing.id },
             data: { images: input.images as unknown as object },

@@ -75,9 +75,11 @@ export function withFacebookContext<T>(
     let context: BrowserContext | null = null;
 
     try {
+      const launchStartedAt = Date.now();
       context = await chromium.launchPersistentContext(FACEBOOK_SESSION_DIR, {
         headless,
       });
+      console.info(`[Facebook][tiempo] iniciar Chromium: ${Date.now() - launchStartedAt} ms`);
       context.setDefaultTimeout(15_000);
       context.setDefaultNavigationTimeout(45_000);
       return await operation(context);

@@ -7,6 +7,7 @@ import { storeFacebookImage } from "./image-cache";
 import type { FacebookPost } from "./types";
 
 const NBSP = String.fromCharCode(160);
+const OPTIONAL_SELECTOR_TIMEOUT_MS = 750;
 
 const DEBUG_DIR = path.join(process.cwd(), ".facebook-debug");
 
@@ -254,28 +255,40 @@ async function extractImages(page: Page, post: Locator) {
     });
   });
 
-  const images: FacebookPost["images"] = [];
-  for (const candidate of candidates) {
-    const response = await page.context().request.get(candidate.sourceUrl, {
-      timeout: 15_000,
-    });
-    const contentType = response.headers()["content-type"]?.split(";")[0];
-    const body = response.ok() ? await response.body() : null;
+  // Las imágenes de un mismo post son independientes. Descargarlas en paralelo
+  // evita acumular hasta 15 s de espera por cada foto de un carrusel.
+  const downloadedImages = await Promise.all(
+    candidates.map(async (candidate): Promise<FacebookPost["images"][number] | null> => {
+      try {
+        const response = await page.context().request.get(candidate.sourceUrl, {
+          timeout: 15_000,
+        });
+        const contentType = response.headers()["content-type"]?.split(";")[0];
+        const body = response.ok() ? await response.body() : null;
 
-    if (
-      body &&
-      body.byteLength <= 10 * 1024 * 1024 &&
-      contentType &&
-      /^image\/(jpeg|png|webp|gif)$/.test(contentType)
-    ) {
-      images.push({
-        url: storeFacebookImage(body, contentType),
-        alt: candidate.alt,
-        width: candidate.width,
-        height: candidate.height,
-      });
-    }
-  }
+        if (
+          !body ||
+          body.byteLength > 10 * 1024 * 1024 ||
+          !contentType ||
+          !/^image\/(jpeg|png|webp|gif)$/.test(contentType)
+        ) {
+          return null;
+        }
+
+        return {
+          url: storeFacebookImage(body, contentType),
+          alt: candidate.alt,
+          width: candidate.width,
+          height: candidate.height,
+        };
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const images = downloadedImages.filter(
+    (image): image is FacebookPost["images"][number] => image !== null,
+  );
 
   if (candidates.length > 0 && images.length === 0) {
     throw new FacebookError(
@@ -298,7 +311,9 @@ async function extractFromContainer(
   // Estrategia principal: el aria-label del propio contenedor suele traer el nombre
   // directo (ej. "Comentario de Fulano hace 4 horas") — más confiable que buscar
   // en <h1-3>/<strong>, que Facebook ya no usa para el nombre del autor.
-  const ariaLabel = await post.getAttribute("aria-label").catch(() => null);
+  const ariaLabel = await post
+    .getAttribute("aria-label", { timeout: OPTIONAL_SELECTOR_TIMEOUT_MS })
+    .catch(() => null);
   const ariaAuthor =
     ariaLabel?.match(/^(?:Comentario de|Comment by|Publicaci[oó]n de|Post by)\s+(.+?)(?:\s+hace\s|$)/i)?.[1] ??
     null;
@@ -308,11 +323,15 @@ async function extractFromContainer(
       .locator("h3 a, h2 a, strong a")
       .filter({ hasText: /\S/ })
       .first()
-      .textContent()
+      .textContent({ timeout: OPTIONAL_SELECTOR_TIMEOUT_MS })
       .catch(() => null),
   );
   const dialogTitle = cleanText(
-    await post.locator("h2, h3").first().textContent().catch(() => null),
+    await post
+      .locator("h2, h3")
+      .first()
+      .textContent({ timeout: OPTIONAL_SELECTOR_TIMEOUT_MS })
+      .catch(() => null),
   );
   const titleAuthor = dialogTitle?.match(/^(?:Publicación de|Post by)\s+(.+)$/i)?.[1] ?? null;
   // Último recurso: cualquier encabezado con texto, aunque no sea un link
@@ -329,7 +348,7 @@ async function extractFromContainer(
       .locator("h1, h2, h3, strong")
       .filter({ hasText: /\S/ })
       .first()
-      .textContent()
+      .textContent({ timeout: OPTIONAL_SELECTOR_TIMEOUT_MS })
       .catch(() => null),
   );
   const looseHeading =
@@ -359,7 +378,7 @@ async function extractFromContainer(
   const permalink = await post
     .locator('a[href*="/posts/"], a[href*="/permalink.php"], a[href*="story_fbid"]')
     .first()
-    .getAttribute("href")
+    .getAttribute("href", { timeout: OPTIONAL_SELECTOR_TIMEOUT_MS })
     .catch(() => null);
 
   console.info(
@@ -378,13 +397,23 @@ async function extractFromContainer(
 export async function extractFacebookPost(page: Page): Promise<FacebookPost> {
   // Los permalinks de Facebook ubican el post objetivo en un diálogo; los comentarios usan role=article.
   const dialog = page.locator('[role="dialog"]:visible').first();
+  const pathname = new URL(page.url()).pathname;
+  const usesFullPageViewer =
+    /^\/photo\/?$/.test(pathname) ||
+    /^\/reel\//.test(pathname) ||
+    /\/videos\//.test(pathname) ||
+    /^\/watch\/?$/.test(pathname);
 
-  try {
-    await dialog.waitFor({ state: "visible", timeout: 15_000 });
-    return await extractFromContainer(page, dialog, page.url());
-  } catch (error) {
-    if (error instanceof FacebookError) throw error;
-    // No es un timeout esperable: dejamos que se propague en vez de intentar el fallback.
+  // Fotos, reels y videos suelen renderizarse directamente en `main`. Esperar
+  // primero 15 s por un diálogo que no existirá era el mayor cuello de botella.
+  if (!usesFullPageViewer || (await dialog.isVisible().catch(() => false))) {
+    try {
+      await dialog.waitFor({ state: "visible", timeout: 15_000 });
+      return await extractFromContainer(page, dialog, page.url());
+    } catch (error) {
+      if (error instanceof FacebookError) throw error;
+      // Si el layout no usa diálogo, seguimos con el contenedor principal.
+    }
   }
 
   // Los videos/reels no siempre se abren en un diálogo — a veces es una página

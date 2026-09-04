@@ -50,6 +50,18 @@ export class FacebookController {
     return this.facebookService.checkAllActiveSources(parseLimit(limit));
   }
 
+  /** Estado de la revisión manual actualmente en ejecución. */
+  @Get("check/status")
+  getCheckStatus() {
+    return this.facebookService.getCheckStatus();
+  }
+
+  /** Solicita detener la revisión en el siguiente punto seguro. */
+  @Post("check/cancel")
+  cancelCheck() {
+    return this.facebookService.cancelActiveCheck();
+  }
+
   /** Estado de la revisión automática (prendida/apagada, cada cuánto). */
   @Get("auto-check")
   getAutoCheckStatus() {

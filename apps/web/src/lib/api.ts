@@ -169,6 +169,17 @@ export const checkAllFacebookSources = (limit?: number) =>
   );
 
 /** Temporal: para verificar el pipeline de análisis aunque no genere alerta. */
+export interface FacebookCheckStatus {
+  running: boolean;
+  cancellationRequested: boolean;
+}
+
+export const fetchFacebookCheckStatus = () =>
+  request<FacebookCheckStatus>("/facebook/check/status");
+
+export const cancelFacebookCheck = () =>
+  request<FacebookCheckStatus>("/facebook/check/cancel", { method: "POST" });
+
 export interface RecentPublicationItem {
   id: string;
   title: string;

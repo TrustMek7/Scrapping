@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import type { Source } from "@prisma/client";
 import type { FacebookPost } from "./lib/types";
 import type { OnPostResult } from "./lib/navigation";
@@ -38,6 +38,7 @@ export interface CheckAllSourcesResultItem {
 @Injectable()
 export class FacebookService {
   private readonly logger = new Logger(FacebookService.name);
+  private activeCheck: { cancellationRequested: boolean } | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -58,6 +59,33 @@ export class FacebookService {
 
   getImage(id: string) {
     return getFacebookImage(id);
+  }
+
+  getCheckStatus() {
+    return {
+      running: this.activeCheck !== null,
+      cancellationRequested: this.activeCheck?.cancellationRequested ?? false,
+    };
+  }
+
+  cancelActiveCheck() {
+    if (!this.activeCheck) return { running: false, cancellationRequested: false };
+    this.activeCheck.cancellationRequested = true;
+    this.logger.warn("[FACEBOOK] se solicitó detener la revisión activa");
+    return this.getCheckStatus();
+  }
+
+  private beginCheck() {
+    if (this.activeCheck) {
+      throw new ConflictException("Ya hay una revisión de Facebook en ejecución.");
+    }
+    const check = { cancellationRequested: false };
+    this.activeCheck = check;
+    return check;
+  }
+
+  private finishCheck(check: { cancellationRequested: boolean }) {
+    if (this.activeCheck === check) this.activeCheck = null;
   }
 
   /**
@@ -82,7 +110,17 @@ export class FacebookService {
       throw new BadRequestException("Esta acción solo está disponible para fuentes de tipo FACEBOOK");
     }
 
-    return this.checkSource(source, (pageUrl, onPost) => getLatestPagePosts(pageUrl, limit, headless, onPost));
+    const check = this.beginCheck();
+    try {
+      return await this.checkSource(
+        source,
+        (pageUrl, onPost, knownPostUrls, shouldCancel) =>
+          getLatestPagePosts(pageUrl, limit, headless, onPost, knownPostUrls, shouldCancel),
+        () => check.cancellationRequested,
+      );
+    } finally {
+      this.finishCheck(check);
+    }
   }
 
   /**
@@ -101,15 +139,35 @@ export class FacebookService {
     walkPosts: (
       pageUrl: string,
       onPost: (post: FacebookPost, index: number) => Promise<OnPostResult>,
+      knownPostUrls: ReadonlySet<string>,
+      shouldCancel: () => boolean,
     ) => Promise<void>,
+    shouldCancel: () => boolean,
   ): Promise<CheckSourcePostOutcome[]> {
     const outcomes: CheckSourcePostOutcome[] = [];
     let newCount = 0;
+    const sourceStartedAt = Date.now();
 
     try {
       const pageUrl = normalizeFacebookPageUrl(source.url);
+      // Permite cortar el scroll apenas aparece el primer permalink ya
+      // procesado. Antes se descubrían siempre los `limit` posts y recién al
+      // extraerlos se detectaba el duplicado, pagando decenas de segundos sin
+      // trabajo útil en cada revisión normal.
+      const knownPublications = await this.prisma.publication.findMany({
+        where: { sourceId: source.id },
+        orderBy: { createdAt: "desc" },
+        take: 200,
+        select: { url: true, canonicalUrl: true },
+      });
+      const knownPostUrls = new Set(
+        knownPublications.flatMap(({ url, canonicalUrl }) =>
+          canonicalUrl ? [url, canonicalUrl] : [url],
+        ),
+      );
 
       await walkPosts(pageUrl, async (post) => {
+        if (shouldCancel()) return { stop: true };
         if (!post.text || post.text.trim().length === 0) {
           const result = await this.analysisService.persistWithoutText({
             sourceId: source.id,
@@ -133,6 +191,7 @@ export class FacebookService {
         // Análisis (IA/filtro previo) + persistencia + alerta + correo, todo
         // acá adentro — cada publicación se procesa de punta a punta antes de
         // pasar a la siguiente (ver runAndPersist/maybeCreateAlert en AnalysisService).
+        const analysisStartedAt = Date.now();
         const result = await this.analysisService.runAndPersist({
           sourceId: source.id,
           title: `Publicación de ${post.author.name ?? source.name}`,
@@ -140,6 +199,9 @@ export class FacebookService {
           url: post.url,
           images: post.images,
         });
+        this.logger.log(
+          `[FACEBOOK][tiempo] persistir + analizar publicación: ${Date.now() - analysisStartedAt} ms`,
+        );
 
         outcomes.push({
           url: post.url,
@@ -157,7 +219,7 @@ export class FacebookService {
 
         newCount += 1;
         return { stop: false };
-      });
+      }, knownPostUrls, shouldCancel);
 
       await this.prisma.source.update({
         where: { id: source.id },
@@ -169,6 +231,10 @@ export class FacebookService {
             : {}),
         },
       });
+
+      this.logger.log(
+        `[FACEBOOK][tiempo] fuente "${source.name}" ${shouldCancel() ? "detenida" : "completada"}: ${Date.now() - sourceStartedAt} ms`,
+      );
 
       return outcomes;
     } catch (error) {
@@ -210,34 +276,50 @@ export class FacebookService {
       return sources.map((source) => ({ sourceId: source.id, sourceName: source.name, ok: false, error }));
     }
 
-    const results: CheckAllSourcesResultItem[] = [];
-    const batchTimeoutMs = Math.max(MIN_BATCH_TIMEOUT_MS, sources.length * PER_SOURCE_TIMEOUT_MS);
+    const check = this.beginCheck();
+    try {
+      const results: CheckAllSourcesResultItem[] = [];
+      const batchTimeoutMs = Math.max(MIN_BATCH_TIMEOUT_MS, sources.length * PER_SOURCE_TIMEOUT_MS);
 
-    await withFacebookContext<void>(
-      true,
-      async (context) => {
-        for (const source of sources) {
-          try {
-            const outcomes = await this.checkSource(source, (pageUrl, onPost) =>
-              getLatestPagePostsInContext(context, pageUrl, limit, onPost),
-            );
-            results.push({
-              sourceId: source.id,
-              sourceName: source.name,
-              ok: true,
-              newPublications: outcomes.filter((o) => o.ok && !o.deduplicated).length,
-              newAlerts: outcomes.filter((o) => o.alertCreated).length,
-            });
-          } catch (error) {
-            const message = error instanceof Error ? error.message : "Error desconocido.";
-            this.logger.warn(`[FACEBOOK] falló la revisión de "${source.name}": ${message}`);
-            results.push({ sourceId: source.id, sourceName: source.name, ok: false, error: message });
+      await withFacebookContext<void>(
+        true,
+        async (context) => {
+          for (const source of sources) {
+            if (check.cancellationRequested) break;
+            try {
+              const outcomes = await this.checkSource(
+                source,
+                (pageUrl, onPost, knownPostUrls, shouldCancel) =>
+                  getLatestPagePostsInContext(
+                    context,
+                    pageUrl,
+                    limit,
+                    onPost,
+                    knownPostUrls,
+                    shouldCancel,
+                  ),
+                () => check.cancellationRequested,
+              );
+              results.push({
+                sourceId: source.id,
+                sourceName: source.name,
+                ok: true,
+                newPublications: outcomes.filter((o) => o.ok && !o.deduplicated).length,
+                newAlerts: outcomes.filter((o) => o.alertCreated).length,
+              });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : "Error desconocido.";
+              this.logger.warn(`[FACEBOOK] falló la revisión de "${source.name}": ${message}`);
+              results.push({ sourceId: source.id, sourceName: source.name, ok: false, error: message });
+            }
           }
-        }
-      },
-      batchTimeoutMs,
-    );
+        },
+        batchTimeoutMs,
+      );
 
-    return results;
+      return results;
+    } finally {
+      this.finishCheck(check);
+    }
   }
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ExcelJS from "exceljs";
 import PageBreadcrumb from "../../components/common/PageBreadCrumb";
 import ComponentCard from "../../components/common/ComponentCard";
@@ -20,10 +20,12 @@ import { useToast } from "../../context/ToastContext";
 import {
   checkAllFacebookSources,
   checkFacebookSource,
+  cancelFacebookCheck,
   deleteAllPublications,
   fetchAlerts,
   fetchAutoCheckStatus,
   fetchFacebookSession,
+  fetchFacebookCheckStatus,
   fetchRecentPublications,
   fetchSources,
   loginFacebook,
@@ -70,6 +72,9 @@ export default function MonitoringAlerts() {
   const [loginPending, setLoginPending] = useState(false);
   const [checking, setChecking] = useState(false);
   const [checkingAll, setCheckingAll] = useState(false);
+  const [checkRunning, setCheckRunning] = useState(false);
+  const [cancelPending, setCancelPending] = useState(false);
+  const cancelRequestedRef = useRef(false);
   const [checkingAllResults, setCheckingAllResults] = useState<CheckAllSourcesResultItem[]>([]);
   const [checkingAllInitialPublicationCount, setCheckingAllInitialPublicationCount] = useState(0);
   const [postLimit, setPostLimit] = useState(10);
@@ -110,7 +115,20 @@ export default function MonitoringAlerts() {
     fetchAutoCheckStatus()
       .then(setAutoCheckState)
       .catch(() => undefined);
+    fetchFacebookCheckStatus()
+      .then((status) => setCheckRunning(status.running))
+      .catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    if (!checkRunning) return;
+    const timer = window.setInterval(() => {
+      fetchFacebookCheckStatus()
+        .then((status) => setCheckRunning(status.running))
+        .catch(() => undefined);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [checkRunning]);
 
   const handleToggleAutoCheck = async () => {
     setAutoCheckPending(true);
@@ -155,7 +173,9 @@ export default function MonitoringAlerts() {
 
   const handleCheckSource = async (headless = true) => {
     if (!selectedSourceId) return;
+    cancelRequestedRef.current = false;
     setChecking(true);
+    setCheckRunning(true);
     try {
       const outcomes = await checkFacebookSource(selectedSourceId, postLimit, headless);
       console.log("[checkFacebookSource] respuesta del backend:", outcomes);
@@ -166,7 +186,9 @@ export default function MonitoringAlerts() {
       const alerts = newOnes.filter((o) => o.alertCreated).length;
       const skipped = outcomes.filter((o) => !o.ok).length;
 
-      if (outcomes.length === 0) {
+      if (cancelRequestedRef.current) {
+        toast.success("Revisión detenida.");
+      } else if (outcomes.length === 0) {
         toast.error("No se encontró ninguna publicación para revisar.");
       } else if (newOnes.length === 0) {
         toast.success("No hay publicaciones nuevas desde la última revisión.");
@@ -183,11 +205,15 @@ export default function MonitoringAlerts() {
       toast.error((err as Error).message);
     } finally {
       setChecking(false);
+      setCheckRunning(false);
+      cancelRequestedRef.current = false;
     }
   };
 
   const handleCheckAll = async () => {
+    cancelRequestedRef.current = false;
     setCheckingAll(true);
+    setCheckRunning(true);
     setCheckingAllResults([]);
     setCheckingAllInitialPublicationCount(recentPublications.length);
     const pollTimer = window.setInterval(() => {
@@ -203,7 +229,9 @@ export default function MonitoringAlerts() {
       const newAlerts = results.reduce((sum, r) => sum + (r.newAlerts ?? 0), 0);
       const failed = results.filter((r) => !r.ok).length;
 
-      if (results.length === 0) {
+      if (cancelRequestedRef.current) {
+        toast.success("Revisión detenida.");
+      } else if (results.length === 0) {
         toast.error("No hay fuentes de Facebook activas para revisar.");
       } else {
         toast.success(
@@ -224,6 +252,27 @@ export default function MonitoringAlerts() {
       load();
       loadRecentPublications();
       setCheckingAll(false);
+      setCheckRunning(false);
+      cancelRequestedRef.current = false;
+    }
+  };
+
+  const handleCancelCheck = async () => {
+    cancelRequestedRef.current = true;
+    setCancelPending(true);
+    try {
+      const status = await cancelFacebookCheck();
+      setCheckRunning(status.running);
+      toast.success(
+        status.cancellationRequested
+          ? "Detención solicitada. Se terminará la operación en curso y no se continuará con las siguientes."
+          : "No hay una revisión activa.",
+      );
+    } catch (err) {
+      cancelRequestedRef.current = false;
+      toast.error((err as Error).message);
+    } finally {
+      setCancelPending(false);
     }
   };
 
@@ -446,6 +495,17 @@ const handleExportRecentPublications = async () => {
             >
               {checkingAll ? "Revisando todas..." : `Revisar todas (${facebookSources.length})`}
             </Button>
+            {(checkRunning || checking || checkingAll) && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="!border-error-500 !text-error-500 hover:!bg-error-50 dark:hover:!bg-error-500/10"
+                onClick={handleCancelCheck}
+                disabled={cancelPending}
+              >
+                {cancelPending ? "Deteniendo..." : "Detener revisión"}
+              </Button>
+            )}
           </div>
           {checkingAll && (
             <p className="mt-3 text-sm text-gray-500 dark:text-gray-400">

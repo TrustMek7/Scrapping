@@ -12,6 +12,8 @@ import {
   normalizeFacebookPostUrl,
 } from "./validators";
 
+const DEBUG_DUMPS_ENABLED = process.env.FACEBOOK_DEBUG_DUMPS === "true";
+
 /** Rechazos compartidos por ambos tipos de link — evidencia real de qué NO es una publicación puntual. */
 function isRejectedLink(url: URL): boolean {
   // Links de notificación tipo "te mencionaron en un comentario"
@@ -178,8 +180,25 @@ function canonicalizePostLink(href: string): string {
   url.searchParams.delete("__cft__[0]");
   url.searchParams.delete("__tn__");
   url.searchParams.delete("mibextid");
+  url.searchParams.delete("rdid");
+  // Facebook alterna estas rutas con y sin slash final. Unificarlas evita que
+  // la misma publicación cuente dos veces por una diferencia cosmética.
+  if (/^\/photo\/?$/.test(url.pathname)) url.pathname = "/photo/";
+  if (/^\/(?:reel|videos)\/[^/]+\/?$/.test(url.pathname) || /\/posts\/[^/]+\/?$/.test(url.pathname)) {
+    url.pathname = `${url.pathname.replace(/\/$/, "")}/`;
+  }
   url.hash = "";
   return url.href;
+}
+
+/** Elige el permalink que representa al post, no una foto secundaria dentro de él. */
+function postLinkPriority(href: string): number {
+  const url = new URL(href, "https://www.facebook.com");
+  if (isShareLinkPath(url.pathname) || /\/posts\//.test(url.pathname)) return 5;
+  if (/\/permalink\.php$/.test(url.pathname) || url.searchParams.has("story_fbid")) return 4;
+  if (/\/videos\//.test(url.pathname) || /^\/reel\/[^/]/.test(url.pathname)) return 3;
+  if (/^\/photo\/?$/.test(url.pathname)) return 2;
+  return 1;
 }
 
 // Facebook renderiza el feed de forma perezosa: al cargar la página solo
@@ -192,10 +211,10 @@ function canonicalizePostLink(href: string): string {
 // vez de eso, scrolleamos en pasos CHICOS y seguidos (como un scroll real de
 // mouse), dejando que el feed cargue de a poco — así el orden de inserción
 // en el DOM tiene más chances de coincidir con el orden visual real.
-const MAX_SCROLL_ATTEMPTS = 20;
-const SMALL_SCROLL_STEPS = 6;
-const SMALL_SCROLL_PX = 350;
-const SMALL_SCROLL_WAIT_MS = 250;
+const MAX_SCROLL_ATTEMPTS = 80;
+const SMALL_SCROLL_STEPS = 1;
+const SMALL_SCROLL_PX = 300;
+const SMALL_SCROLL_WAIT_MS = 600;
 
 /**
  * Fuente principal: junta, en el mismo orden en que aparecen en pantalla,
@@ -212,25 +231,42 @@ async function collectLatestPostLinksFromDom(
   limit: number,
   seen: Set<string> = new Set(),
   results: string[] = [],
-): Promise<string[]> {
+  knownPostUrls: ReadonlySet<string> = new Set(),
+  firstPostFromJson: string | null = null,
+  shouldCancel: () => boolean = () => false,
+): Promise<{ links: string[]; reachedKnownPost: boolean; cancelled: boolean }> {
   const pageSegment = extractPageSegment(pageUrl);
   const allHrefsEverSeen = new Set<string>();
+  const seenPostContainers = new Set<string>();
+  let reachedKnownPost = false;
+  let jsonFallbackHandled = firstPostFromJson === null;
+
+  // Esperamos una sola vez a que cualquiera de los layouts tenga links. Antes
+  // se esperaba hasta 15 s por `feed` y, si no existía, otros 15 s por `main`.
+  const anyAnchor = page.locator('[role="feed"] a[href], [role="main"] a[href]').first();
+  const anchorsDeadline = Date.now() + 15_000;
+  let pageHasAnchors = false;
+  while (!shouldCancel() && Date.now() < anchorsDeadline) {
+    pageHasAnchors = (await anyAnchor.count().catch(() => 0)) > 0;
+    if (pageHasAnchors) break;
+    await page.waitForTimeout(250);
+  }
+
+  if (shouldCancel()) return { links: results, reachedKnownPost, cancelled: true };
+  if (!pageHasAnchors) {
+    if (firstPostFromJson) results.push(firstPostFromJson);
+    return { links: results, reachedKnownPost, cancelled: false };
+  }
 
   for (const containerSelector of ['[role="feed"]', '[role="main"]']) {
     const container = page.locator(containerSelector).first();
     const anchors = container.locator("a[href]");
-
-    const ready = await anchors
-      .first()
-      .waitFor({ state: "attached", timeout: 15_000 })
-      .then(() => true)
-      .catch(() => false);
-
-    if (!ready) continue;
+    if ((await anchors.count().catch(() => 0)) === 0) continue;
 
     const resultsBeforeThisContainer = results.length;
 
     for (let attempt = 0; attempt <= MAX_SCROLL_ATTEMPTS; attempt++) {
+      if (shouldCancel()) return { links: results, reachedKnownPost, cancelled: true };
       // Ojo: evaluateAll() devuelve los elementos en orden del DOCUMENTO, no
       // necesariamente en orden VISUAL — si Facebook virtualiza el feed
       // reciclando/reposicionando elementos con CSS (transform/translate) en
@@ -244,9 +280,21 @@ async function collectLatestPostLinksFromDom(
           els
             .map((el) => {
               const rect = el.getBoundingClientRect();
+              // El article inmediato identifica la tarjeta que contiene este
+              // enlace. Subir hasta el article exterior puede alcanzar un
+              // wrapper que agrupa varias unidades del feed y mezclar posts.
+              const article = el.closest('[role="article"]');
+              const articleRect = article?.getBoundingClientRect();
+              const articleTop = articleRect
+                ? Math.round(articleRect.top + window.scrollY)
+                : null;
               return {
                 href: (el as HTMLAnchorElement).getAttribute("href") ?? "",
                 top: rect.top + window.scrollY,
+                // Todos los links de una galería/foto/caption dentro del mismo
+                // article comparten esta clave y deben producir UN solo post.
+                articleKey: articleTop === null ? null : `article:${articleTop}`,
+                postTop: articleTop ?? rect.top + window.scrollY,
                 // Un elemento oculto (display:none, o un padre colapsado)
                 // devuelve un rect de puros ceros — eso lo ordenaría como si
                 // estuviera arriba de todo, dando un orden falso. Se
@@ -256,21 +304,83 @@ async function collectLatestPostLinksFromDom(
             })
             .filter((a) => a.visible),
         )
-        .catch(() => [] as { href: string; top: number; visible: boolean }[]);
+        .catch(
+          () =>
+            [] as {
+              href: string;
+              top: number;
+              articleKey: string | null;
+              postTop: number;
+              visible: boolean;
+            }[],
+        );
 
-      anchorData.sort((a, b) => a.top - b.top);
+      anchorData.sort((a, b) => a.postTop - b.postTop || a.top - b.top);
 
       for (const { href } of anchorData) if (href) allHrefsEverSeen.add(href);
 
       let newMatchesThisPass = 0;
 
-      for (const { href } of anchorData) {
-        if (results.length >= limit) break;
-        if (!href || !(isNormalPostLink(href) || isVideoOrLiveLink(href))) continue;
-        if (!belongsToPage(href, pageSegment)) continue;
+      const eligible = anchorData.filter(({ href }) => {
+        if (!href || !(isNormalPostLink(href) || isVideoOrLiveLink(href))) return false;
+        return belongsToPage(href, pageSegment);
+      });
+      const hasArticleCandidates = eligible.some(({ articleKey }) => articleKey !== null);
+      type AnchorCandidate = (typeof eligible)[number];
+      const candidatesByPost = new Map<
+        string,
+        { preferred: AnchorCandidate; aliases: Set<string> }
+      >();
 
-        const canonical = canonicalizePostLink(href);
-        if (!seen.has(canonical)) {
+      for (const candidate of eligible) {
+        // Cuando existen articles reales, los links sueltos de `main` suelen
+        // pertenecer a carruseles laterales, navegación o contenido recomendado.
+        if (hasArticleCandidates && !candidate.articleKey) continue;
+        const canonical = canonicalizePostLink(candidate.href);
+        const key = candidate.articleKey ?? `link:${canonical}`;
+        const previous = candidatesByPost.get(key);
+        if (!previous) {
+          candidatesByPost.set(key, { preferred: candidate, aliases: new Set([canonical]) });
+          continue;
+        }
+        previous.aliases.add(canonical);
+        if (postLinkPriority(candidate.href) > postLinkPriority(previous.preferred.href)) {
+          previous.preferred = candidate;
+        }
+      }
+
+      const postCandidates = [...candidatesByPost.entries()].sort(
+        ([, a], [, b]) => a.preferred.postTop - b.preferred.postTop,
+      );
+
+      // El JSON y el primer article visible pueden ser dos URLs distintas del
+      // mismo post. Usamos el JSON solo cuando el article superior NO tiene un
+      // permalink reconocible; así completa el hueco sin duplicar el post #1.
+      if (!jsonFallbackHandled && firstPostFromJson) {
+        jsonFallbackHandled = true;
+        const firstVisibleArticle = anchorData.find(({ articleKey }) => articleKey)?.articleKey;
+        const firstPostArticle = postCandidates.find(([key]) => key.startsWith("article:"))?.[0];
+        if (!firstVisibleArticle || firstVisibleArticle !== firstPostArticle) {
+          seen.add(firstPostFromJson);
+          results.push(firstPostFromJson);
+          newMatchesThisPass += 1;
+          console.info(`[Facebook] Primer post completado desde el JSON ordenado: ${firstPostFromJson}`);
+        }
+      }
+
+      for (const [postKey, { preferred, aliases }] of postCandidates) {
+        if (results.length >= limit) break;
+        if (seenPostContainers.has(postKey)) continue;
+
+        if ([...aliases].some((alias) => knownPostUrls.has(alias))) {
+          seenPostContainers.add(postKey);
+          reachedKnownPost = true;
+          break;
+        }
+        if (![...aliases].some((alias) => seen.has(alias))) {
+          const canonical = canonicalizePostLink(preferred.href);
+          seenPostContainers.add(postKey);
+          for (const alias of aliases) seen.add(alias);
           seen.add(canonical);
           results.push(canonical);
           newMatchesThisPass += 1;
@@ -294,31 +404,39 @@ async function collectLatestPostLinksFromDom(
         await dumpDebugPage(page, "first-attempt-no-match");
       }
 
-      if (results.length >= limit || attempt === MAX_SCROLL_ATTEMPTS) break;
+      if (reachedKnownPost || results.length >= limit || attempt === MAX_SCROLL_ATTEMPTS) break;
 
       // Varios pasos chicos y seguidos en vez de un salto grande de una sola
       // vez (ni "saltar al último conocido" ni un empujón grande) — así el
       // feed carga de a poco, en vez de en una tanda grande donde el orden
       // de inserción en el DOM puede no coincidir con el orden visual real.
       for (let step = 0; step < SMALL_SCROLL_STEPS; step++) {
+        if (shouldCancel()) return { links: results, reachedKnownPost, cancelled: true };
         await page.mouse.wheel(0, SMALL_SCROLL_PX);
         await page.waitForTimeout(SMALL_SCROLL_WAIT_MS);
       }
     }
 
-    if (results.length > resultsBeforeThisContainer) break;
+    if (reachedKnownPost || results.length > resultsBeforeThisContainer) break;
   }
 
   // Diagnóstico: TODOS los href vistos durante todo el proceso (matcheen o
   // no), para poder confirmar si un link esperado apareció en algún momento
-  // del scroll y por qué no se reconoció, en vez de asumir que nunca cargó.
-  console.info(
-    `[Facebook] Todos los <a href> vistos durante el scroll (${allHrefsEverSeen.size}):`,
-    JSON.stringify([...allHrefsEverSeen], null, 2),
-  );
-  await dumpDebugPage(page, "scroll-finished");
+  // del scroll y por qué no se reconoció. Antes esto se volcaba SIEMPRE
+  // (éxito o no) — pantallazo + HTML completo a disco en cada fuente
+  // revisada, aunque haya encontrado las `limit` publicaciones sin ningún
+  // problema. Puro I/O de diagnóstico que nadie mira cuando todo salió bien;
+  // ahora solo se vuelca cuando el resultado final quedó vacío, que es el
+  // único caso en que hace falta para investigar.
+  if (results.length === 0) {
+    console.info(
+      `[Facebook] Todos los <a href> vistos durante el scroll (${allHrefsEverSeen.size}):`,
+      JSON.stringify([...allHrefsEverSeen], null, 2),
+    );
+    await dumpDebugPage(page, "scroll-finished");
+  }
 
-  return results;
+  return { links: results, reachedKnownPost, cancelled: false };
 }
 
 /**
@@ -364,11 +482,18 @@ function findFirstPostFromTimelineJson(html: string): string | null {
  * (o el #1 también, si el JSON no lo tenía) se completa con el DOM, que ya
  * funciona bien para contenido cargado de forma perezosa.
  */
-async function collectLatestPostLinks(page: Page, pageUrl: string, limit: number): Promise<string[]> {
+async function collectLatestPostLinks(
+  page: Page,
+  pageUrl: string,
+  limit: number,
+  knownPostUrls: ReadonlySet<string> = new Set(),
+  shouldCancel: () => boolean = () => false,
+): Promise<{ links: string[]; reachedKnownPost: boolean; cancelled: boolean }> {
   const seen = new Set<string>();
   const results: string[] = [];
 
   const html = await page.content();
+  if (shouldCancel()) return { links: [], reachedKnownPost: false, cancelled: true };
   const firstFromJson = findFirstPostFromTimelineJson(html);
 
   // Ojo: NO pasa por belongsToPage() acá a propósito. Ese chequeo compara
@@ -382,14 +507,22 @@ async function collectLatestPostLinks(page: Page, pageUrl: string, limit: number
   // scopeado a la página correcta por construcción.
   if (firstFromJson) {
     const canonical = canonicalizePostLink(firstFromJson);
-    seen.add(canonical);
-    results.push(canonical);
-    console.info(`[Facebook] Primer post obtenido del JSON ordenado del feed: ${canonical}`);
+    if (knownPostUrls.has(canonical)) {
+      console.info(`[Facebook] La publicación más reciente ya fue procesada: ${canonical}`);
+      return { links: [], reachedKnownPost: true, cancelled: false };
+    }
   }
 
-  if (results.length >= limit) return results;
-
-  return collectLatestPostLinksFromDom(page, pageUrl, limit, seen, results);
+  return collectLatestPostLinksFromDom(
+    page,
+    pageUrl,
+    limit,
+    seen,
+    results,
+    knownPostUrls,
+    firstFromJson ? canonicalizePostLink(firstFromJson) : null,
+    shouldCancel,
+  );
 }
 
 // Cuando se reusa un mismo contexto/página entre varias fuentes (ver
@@ -412,6 +545,13 @@ async function guardNavigation(page: Page) {
       return;
     }
 
+    // Para descubrir links y leer captions no necesitamos descargar fuentes ni
+    // streams de audio/video. Las imágenes se mantienen porque sí se guardan.
+    if (request.resourceType() === "font" || request.resourceType() === "media") {
+      await route.abort("blockedbyclient");
+      return;
+    }
+
     await route.continue();
   });
 }
@@ -422,7 +562,9 @@ async function openFacebookPage(context: BrowserContext, requestedUrl: string): 
   await guardNavigation(page);
 
   console.info("[Facebook] Waiting for page...");
+  const navigationStartedAt = Date.now();
   const response = await page.goto(requestedUrl, { waitUntil: "domcontentloaded" });
+  console.info(`[Facebook][tiempo] abrir perfil: ${Date.now() - navigationStartedAt} ms`);
 
   if (response?.status() === 404) {
     throw new FacebookError("POST_NOT_FOUND", "La página no existe.", 404);
@@ -473,7 +615,9 @@ async function extractPostAtPermalink(
   requestedUrl: string,
 ): Promise<FacebookPost | null> {
   console.info(`[Facebook] Navegando al permalink de la publicación: ${permalink}`);
+  const navigationStartedAt = Date.now();
   const postResponse = await page.goto(permalink, { waitUntil: "domcontentloaded" });
+  console.info(`[Facebook][tiempo] abrir permalink: ${Date.now() - navigationStartedAt} ms`);
 
   if (postResponse?.status() === 404) return null;
 
@@ -493,9 +637,11 @@ async function extractPostAtPermalink(
   // A diferencia de getFacebookPost() (URL de post explícita), acá NO rechazamos
   // videos: si la publicación es un video, igual devolvemos su texto/caption
   // (si tiene) e ignoramos el video en sí.
+  const extractionStartedAt = Date.now();
   const post = await extractFacebookPost(page);
+  console.info(`[Facebook][tiempo] extraer publicación: ${Date.now() - extractionStartedAt} ms`);
 
-  if (!post.text || post.text.trim().length === 0) {
+  if (DEBUG_DUMPS_ENABLED && (!post.text || post.text.trim().length === 0)) {
     // El chequeo de "sin texto" vive en el llamador — pero si Facebook SÍ
     // mostraba una descripción visible (confirmado con un caso real:
     // transmisiones en vivo), necesitamos el HTML real para saber por qué
@@ -594,7 +740,8 @@ export async function getLatestPagePost(input: unknown) {
     // Importante: si no aparece ningún link confiable, NO adivinamos con
     // cualquier link de la página entera — eso una vez trajo un link de
     // notificación de OTRA persona. Mejor fallar con diagnóstico.
-    const [foundHref] = await collectLatestPostLinks(page, requestedUrl, 1);
+    const { links } = await collectLatestPostLinks(page, requestedUrl, 1);
+    const [foundHref] = links;
 
     if (!foundHref) {
       await dumpDebugPage(page, "no-post-link-found");
@@ -647,14 +794,31 @@ export async function getLatestPagePostsInContext(
   input: unknown,
   limit: number,
   onPost: (post: FacebookPost, index: number) => Promise<OnPostResult>,
+  knownPostUrls: ReadonlySet<string> = new Set(),
+  shouldCancel: () => boolean = () => false,
 ): Promise<void> {
   const requestedUrl = normalizeFacebookPageUrl(input);
   const page = await openFacebookPage(context, requestedUrl);
 
   console.info(`[Facebook] Page opened successfully, looking for up to ${limit} recent posts...`);
-  const permalinks = await collectLatestPostLinks(page, requestedUrl, limit);
+  const normalizedKnownUrls = new Set(
+    [...knownPostUrls].map((url) => canonicalizePostLink(url)),
+  );
+  const discoveryStartedAt = Date.now();
+  const { links: permalinks, reachedKnownPost, cancelled } = await collectLatestPostLinks(
+    page,
+    requestedUrl,
+    limit,
+    normalizedKnownUrls,
+    shouldCancel,
+  );
+  console.info(
+    `[Facebook][tiempo] descubrir enlaces: ${Date.now() - discoveryStartedAt} ms (${permalinks.length} nuevo(s))`,
+  );
 
   if (permalinks.length === 0) {
+    if (cancelled) return;
+    if (reachedKnownPost) return;
     await dumpDebugPage(page, "no-post-link-found");
     throw new FacebookError(
       "EXTRACTION_FAILED",
@@ -667,8 +831,10 @@ export async function getLatestPagePostsInContext(
   console.info(`[Facebook] Lista completa de permalinks detectados: ${JSON.stringify(permalinks, null, 2)}`);
 
   for (const [index, permalink] of permalinks.entries()) {
+    if (shouldCancel()) return;
     const post = await extractPostAtPermalink(page, permalink, requestedUrl);
     if (!post) continue;
+    if (shouldCancel()) return;
 
     const { stop } = await onPost(post, index);
     if (stop) break;
@@ -680,6 +846,8 @@ export async function getLatestPagePosts(
   limit: number,
   headless: boolean,
   onPost: (post: FacebookPost, index: number) => Promise<OnPostResult>,
+  knownPostUrls: ReadonlySet<string> = new Set(),
+  shouldCancel: () => boolean = () => false,
 ): Promise<void> {
   if (!(await hasStoredSession())) {
     throw new FacebookError("SESSION_REQUIRED", "Necesitas iniciar sesión en Facebook.", 401);
@@ -687,6 +855,6 @@ export async function getLatestPagePosts(
 
   console.info(`[Facebook] Opening page... (headless=${headless})`);
   return withFacebookContext<void>(headless, (context) =>
-    getLatestPagePostsInContext(context, input, limit, onPost),
+    getLatestPagePostsInContext(context, input, limit, onPost, knownPostUrls, shouldCancel),
   );
 }
