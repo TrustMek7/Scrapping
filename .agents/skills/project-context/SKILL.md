@@ -218,7 +218,7 @@ en `analysis.module.ts` — no tocar `AnalysisService` ni el prompt.
   `/monitoreo/fuentes`, `/monitoreo/entidades` (listado + modal de alta/edición para las dos
   últimas). `/` redirige a `/monitoreo/alertas`; cualquier ruta no reconocida cae en el 404
   real (`pages/OtherPage/NotFound.tsx`, ya existía, solo se conectó bien). Marca del proyecto:
-  "Alertas Nación" (sidebar, header móvil, `<title>`) — reemplaza el branding TailAdmin.
+  "Alertas" (sidebar, header móvil, `<title>`) — reemplaza el branding TailAdmin.
   Se conservó la librería de componentes reutilizables de TailAdmin (`components/ui`,
   `components/form` sin las demos de `form-elements`, `components/common`) porque Etapa 4
   todavía la necesita.
@@ -244,7 +244,7 @@ Pendiente (según las etapas del enfoque original):
 primero en `apps/postscope` (un proyecto Next.js que llegó ya armado, ver el incidente del
 refactor más abajo), pero el usuario pidió explícitamente que PostScope fuera solo **un
 ejemplo de referencia** — el mecanismo real tenía que vivir **dentro del backend principal**,
-con el botón de acción **en el dashboard de Alertas Nación** (`apps/web`), no en una app
+con el botón de acción **en el dashboard de Alertas** (`apps/web`), no en una app
 Next.js aparte corriendo en otro puerto. Eso es lo que existe ahora:
 
 - `apps/backend/src/facebook/lib/` — puerto casi literal de `apps/postscope/src/lib/facebook/`

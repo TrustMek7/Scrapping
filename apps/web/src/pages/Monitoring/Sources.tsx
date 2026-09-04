@@ -28,11 +28,7 @@ import {
 import type { SourceStatus, SourceType } from "@scrapping/shared";
 
 const TYPE_OPTIONS: { value: SourceType; label: string }[] = [
-  { value: "WEBSITE", label: "Página web" },
-  { value: "RSS", label: "RSS" },
   { value: "FACEBOOK", label: "Facebook" },
-  { value: "INSTAGRAM", label: "Instagram" },
-  { value: "OTHER", label: "Otra" },
 ];
 
 const STATUS_OPTIONS: { value: SourceStatus; label: string }[] = [
@@ -53,7 +49,7 @@ interface FormState {
   status: SourceStatus;
 }
 
-const EMPTY_FORM: FormState = { name: "", type: "WEBSITE", url: "", status: "ACTIVE" };
+const EMPTY_FORM: FormState = { name: "", type: "FACEBOOK", url: "", status: "ACTIVE" };
 
 export default function Sources() {
   const [sources, setSources] = useState<SourceItem[]>([]);

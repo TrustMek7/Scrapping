@@ -12,9 +12,35 @@ import {
   UseInterceptors,
 } from "@nestjs/common";
 import { FileInterceptor } from "@nestjs/platform-express";
-import { Workbook } from "exceljs";
+import { Workbook, type Cell } from "exceljs";
+import { Readable } from "node:stream";
 import { CreateSourceSchema, UpdateSourceSchema } from "@scrapping/shared";
 import { PrismaService } from "../prisma/prisma.service";
+
+function cellText(cell: Cell): string {
+  const value = cell.value;
+  if (value == null) return "";
+  if (typeof value === "object") {
+    if ("richText" in value && Array.isArray(value.richText)) {
+      return value.richText.map((run) => run.text).join("").trim();
+    }
+    if ("text" in value && typeof value.text === "string") {
+      return value.text.trim();
+    }
+    if ("result" in value) {
+      return String(value.result ?? "").trim();
+    }
+  }
+  return String(value).trim();
+}
+
+function cellUrl(cell: Cell): string {
+  const value = cell.value;
+  if (value && typeof value === "object" && "hyperlink" in value && typeof value.hyperlink === "string") {
+    return value.hyperlink.trim();
+  }
+  return cellText(cell);
+}
 
 @Controller("sources")
 export class SourcesController {
@@ -38,7 +64,17 @@ export class SourcesController {
     }
 
     const workbook = new Workbook();
-    await workbook.xlsx.load(file.buffer);
+    try {
+      if (extension === "csv") {
+        await workbook.csv.read(Readable.from(file.buffer));
+      } else {
+        await workbook.xlsx.load(file.buffer);
+      }
+    } catch {
+      throw new BadRequestException(
+        "No se pudo leer el archivo. Verificá que sea un .xlsx, .xls o .csv válido (si es .xls antiguo, guardalo como .xlsx).",
+      );
+    }
     const worksheet = workbook.worksheets[0];
 
     if (!worksheet) {
@@ -51,8 +87,8 @@ export class SourcesController {
 
     for (let rowNumber = 2; rowNumber <= worksheet.rowCount; rowNumber += 1) {
       const row = worksheet.getRow(rowNumber);
-      const name = String(row.getCell(1).value ?? "").trim();
-      const rawUrl = String(row.getCell(2).value ?? "").trim();
+      const name = cellText(row.getCell(1));
+      const rawUrl = cellUrl(row.getCell(2));
 
       if (!name && !rawUrl) continue;
 
