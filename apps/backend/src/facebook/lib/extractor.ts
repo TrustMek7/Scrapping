@@ -295,8 +295,6 @@ async function extractFromContainer(
   requireAuthor = true,
   includeImages = true,
 ): Promise<FacebookPost> {
-  console.info("[Facebook] Extracting author...");
-
   // Estrategia principal: el aria-label del propio contenedor suele traer el nombre
   // directo (ej. "Comentario de Fulano hace 4 horas") — más confiable que buscar
   // en <h1-3>/<strong>, que Facebook ya no usa para el nombre del autor.
@@ -347,7 +345,6 @@ async function extractFromContainer(
     );
   }
 
-  console.info("[Facebook] Extracting text...");
   const text = await extractMessageText(post, page);
 
   // En el modo relajado (videos/en vivo sin diálogo aislado) el contenedor es
@@ -355,7 +352,6 @@ async function extractFromContainer(
   // Facebook (confirmado con evidencia real: se coló una imagen publicitaria
   // de una plataforma de trading). El objetivo para videos siempre fue "solo
   // texto, sin el contenido visual", así que directamente no buscamos imágenes.
-  console.info("[Facebook] Extracting images...");
   const images = includeImages ? await extractImages(page, post) : [];
 
   // Intenta encontrar el permalink real de la publicación (el link del timestamp);
@@ -365,6 +361,10 @@ async function extractFromContainer(
     .first()
     .getAttribute("href")
     .catch(() => null);
+
+  console.info(
+    `[Facebook] Publicación extraída — autor: "${author ?? "(sin autor)"}", ${text ? `${text.length} caracteres de texto` : "sin texto"}, ${images.length} imagen(es)`,
+  );
 
   return {
     url: permalink ? new URL(permalink, "https://www.facebook.com").href : fallbackUrl,
