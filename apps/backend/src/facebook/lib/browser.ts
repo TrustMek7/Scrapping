@@ -46,8 +46,11 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
  * operación individual tiene un tiempo máximo (mismo margen que el login
  * manual) para que una que se cuelgue no bloquee la cola para siempre.
  */
-export function runWithBrowserLock<T>(operation: () => Promise<T>): Promise<T> {
-  const run = queueTail.then(() => withTimeout(operation(), OPERATION_TIMEOUT_MS));
+export function runWithBrowserLock<T>(
+  operation: () => Promise<T>,
+  timeoutMs: number = OPERATION_TIMEOUT_MS,
+): Promise<T> {
+  const run = queueTail.then(() => withTimeout(operation(), timeoutMs));
   // La cola sigue pase lo que pase (éxito o error) — nunca se traba por el
   // fallo de una operación individual.
   queueTail = run.then(
@@ -57,9 +60,16 @@ export function runWithBrowserLock<T>(operation: () => Promise<T>): Promise<T> {
   return run;
 }
 
+/**
+ * `timeoutMs` es por-operación: quien procesa varias fuentes dentro de UN
+ * solo `withFacebookContext` (ver `checkAllActiveSources`) debe pasar un
+ * margen que escale con la cantidad de fuentes — el default (pensado para
+ * una sola fuente o el login manual) se quedaría corto para un lote grande.
+ */
 export function withFacebookContext<T>(
   headless: boolean,
   operation: (context: BrowserContext) => Promise<T>,
+  timeoutMs: number = OPERATION_TIMEOUT_MS,
 ) {
   return runWithBrowserLock(async () => {
     let context: BrowserContext | null = null;
@@ -84,5 +94,5 @@ export function withFacebookContext<T>(
     } finally {
       await context?.close().catch(() => undefined);
     }
-  });
+  }, timeoutMs);
 }

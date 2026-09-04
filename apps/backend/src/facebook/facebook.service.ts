@@ -1,12 +1,19 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
+import type { Source } from "@prisma/client";
+import type { FacebookPost } from "./lib/types";
 import { PrismaService } from "../prisma/prisma.service";
 import { AnalysisService } from "../analysis/analysis.service";
-import { checkSession, resetSession, startLogin } from "./lib/session";
-import { getLatestPagePosts } from "./lib/navigation";
+import { checkSession, hasStoredSession, resetSession, startLogin } from "./lib/session";
+import { getLatestPagePosts, getLatestPagePostsInContext } from "./lib/navigation";
+import { withFacebookContext } from "./lib/browser";
 import { normalizeFacebookPageUrl } from "./lib/validators";
 import { getFacebookImage } from "./lib/image-cache";
 
 const DEFAULT_POST_LIMIT = 10;
+// Overhead fijo de arrancar/cerrar Chromium para UNA fuente (referencia para
+// dimensionar el margen del lote entero en checkAllActiveSources).
+const PER_SOURCE_TIMEOUT_MS = 90 * 1000;
+const MIN_BATCH_TIMEOUT_MS = 11 * 60 * 1000;
 
 export interface CheckSourcePostOutcome {
   url: string;
@@ -74,11 +81,24 @@ export class FacebookService {
       throw new BadRequestException("Esta acción solo está disponible para fuentes de tipo FACEBOOK");
     }
 
+    return this.checkSource(source, (pageUrl) => getLatestPagePosts(pageUrl, limit, headless));
+  }
+
+  /**
+   * Núcleo compartido por `checkLatestFromSource` (una fuente puntual, con
+   * su propio navegador) y `checkAllActiveSources` (todas las fuentes en un
+   * único navegador reusado) — lo único que cambia entre ambas es CÓMO se
+   * obtienen los posts (`fetchPosts`), no qué se hace con ellos.
+   */
+  private async checkSource(
+    source: Source,
+    fetchPosts: (pageUrl: string) => Promise<FacebookPost[]>,
+  ): Promise<CheckSourcePostOutcome[]> {
     const outcomes: CheckSourcePostOutcome[] = [];
 
     try {
       const pageUrl = normalizeFacebookPageUrl(source.url);
-      const posts = await getLatestPagePosts(pageUrl, limit, headless);
+      const posts = await fetchPosts(pageUrl);
 
       let newCount = 0;
 
@@ -159,9 +179,13 @@ export class FacebookService {
   }
 
   /**
-   * Revisa todas las Source de tipo FACEBOOK activas, una por una (secuencial,
-   * misma sesión de navegador). El fallo de una fuente no detiene a las demás
-   * — cada resultado (éxito o error) se acumula y se devuelve al final.
+   * Revisa todas las Source de tipo FACEBOOK activas, una por una, dentro de
+   * UN SOLO navegador reusado para todo el lote — arrancar/cerrar Chromium
+   * por fuente es puro overhead fijo que no depende del contenido de cada
+   * una, así que evitarlo repetir N veces ahorra tiempo real sin tocar la
+   * lógica de extracción. El fallo de una fuente no detiene a las demás ni
+   * cierra el navegador — cada resultado (éxito o error) se acumula y se
+   * devuelve al final.
    */
   async checkAllActiveSources(
     limit = DEFAULT_POST_LIMIT,
@@ -170,26 +194,40 @@ export class FacebookService {
       where: { type: "FACEBOOK", status: "ACTIVE" },
     });
 
-    const results: CheckAllSourcesResultItem[] = [];
+    if (sources.length === 0) return [];
 
-    for (const source of sources) {
-      try {
-        const outcomes = await this.checkLatestFromSource(source.id, limit);
-        const result = {
-          sourceId: source.id,
-          sourceName: source.name,
-          ok: true,
-          newPublications: outcomes.filter((o) => o.ok && !o.deduplicated).length,
-          newAlerts: outcomes.filter((o) => o.alertCreated).length,
-        } satisfies CheckAllSourcesResultItem;
-        results.push(result);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Error desconocido.";
-        this.logger.warn(`[FACEBOOK] falló la revisión de "${source.name}": ${message}`);
-        const result = { sourceId: source.id, sourceName: source.name, ok: false, error: message };
-        results.push(result);
-      }
+    if (!(await hasStoredSession())) {
+      const error = "Necesitas iniciar sesión en Facebook.";
+      return sources.map((source) => ({ sourceId: source.id, sourceName: source.name, ok: false, error }));
     }
+
+    const results: CheckAllSourcesResultItem[] = [];
+    const batchTimeoutMs = Math.max(MIN_BATCH_TIMEOUT_MS, sources.length * PER_SOURCE_TIMEOUT_MS);
+
+    await withFacebookContext<void>(
+      true,
+      async (context) => {
+        for (const source of sources) {
+          try {
+            const outcomes = await this.checkSource(source, (pageUrl) =>
+              getLatestPagePostsInContext(context, pageUrl, limit),
+            );
+            results.push({
+              sourceId: source.id,
+              sourceName: source.name,
+              ok: true,
+              newPublications: outcomes.filter((o) => o.ok && !o.deduplicated).length,
+              newAlerts: outcomes.filter((o) => o.alertCreated).length,
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "Error desconocido.";
+            this.logger.warn(`[FACEBOOK] falló la revisión de "${source.name}": ${message}`);
+            results.push({ sourceId: source.id, sourceName: source.name, ok: false, error: message });
+          }
+        }
+      },
+      batchTimeoutMs,
+    );
 
     return results;
   }

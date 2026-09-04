@@ -392,7 +392,16 @@ async function collectLatestPostLinks(page: Page, pageUrl: string, limit: number
   return collectLatestPostLinksFromDom(page, pageUrl, limit, seen, results);
 }
 
+// Cuando se reusa un mismo contexto/página entre varias fuentes (ver
+// `getLatestPagePostsInContext`), `openFacebookPage` se llama una vez por
+// fuente sobre la MISMA página — sin este guard, cada llamada apilaría un
+// nuevo `page.route()` sobre la anterior en vez de reemplazarla.
+const guardedPages = new WeakSet<Page>();
+
 async function guardNavigation(page: Page) {
+  if (guardedPages.has(page)) return;
+  guardedPages.add(page);
+
   await page.route("**/*", async (route) => {
     const request = route.request();
     const mainNavigation = request.isNavigationRequest() && request.frame() === page.mainFrame();
@@ -613,50 +622,64 @@ export async function getLatestPagePost(input: unknown) {
  * El llamador (FacebookService) es responsable de deduplicar contra lo que
  * ya está guardado — acá simplemente se devuelve la lista, en el mismo
  * orden (más reciente primero) en que aparecen en el timeline.
+ *
+ * Recibe un `BrowserContext` ya abierto (en vez de abrir el suyo propio) para
+ * que quien revisa varias fuentes seguidas (`checkAllActiveSources`) pueda
+ * reusar UN solo navegador para todas, en vez de relanzar Chromium por cada
+ * una — el arranque/cierre del navegador es puro overhead fijo por fuente,
+ * no depende del contenido de cada una. `getLatestPagePosts()` (abajo) es el
+ * wrapper para cuando se revisa una sola fuente y no hay contexto que reusar.
  */
+export async function getLatestPagePostsInContext(
+  context: BrowserContext,
+  input: unknown,
+  limit = 10,
+): Promise<FacebookPost[]> {
+  const requestedUrl = normalizeFacebookPageUrl(input);
+  const page = await openFacebookPage(context, requestedUrl);
+
+  console.info(`[Facebook] Page opened successfully, looking for up to ${limit} recent posts...`);
+  const permalinks = await collectLatestPostLinks(page, requestedUrl, limit);
+
+  if (permalinks.length === 0) {
+    await dumpDebugPage(page, "no-post-link-found");
+    throw new FacebookError(
+      "EXTRACTION_FAILED",
+      "No se encontró ningún link a una publicación en esta página. Se guardó un volcado en .facebook-debug/ para diagnosticar.",
+      422,
+    );
+  }
+
+  console.info(`[Facebook] ★★★ PRIMER POST detectado (posición 0 de ${permalinks.length}): ${permalinks[0]} ★★★`);
+  console.info(`[Facebook] Lista completa de permalinks detectados: ${JSON.stringify(permalinks, null, 2)}`);
+
+  const posts: FacebookPost[] = [];
+  for (const [index, permalink] of permalinks.entries()) {
+    const post = await extractPostAtPermalink(page, permalink, requestedUrl);
+    if (post) {
+      posts.push(post);
+      if (index === 0) {
+        console.info(
+          `[Facebook] ★★★ PRIMER POST extraído — autor: "${post.author.name ?? "(sin autor)"}", texto: "${(post.text ?? "").slice(0, 80)}${(post.text?.length ?? 0) > 80 ? "..." : ""}", url final: ${post.url} ★★★`,
+        );
+      }
+    }
+  }
+
+  return posts;
+}
+
 export async function getLatestPagePosts(
   input: unknown,
   limit = 10,
   headless = true,
 ): Promise<FacebookPost[]> {
-  const requestedUrl = normalizeFacebookPageUrl(input);
-
   if (!(await hasStoredSession())) {
     throw new FacebookError("SESSION_REQUIRED", "Necesitas iniciar sesión en Facebook.", 401);
   }
 
   console.info(`[Facebook] Opening page... (headless=${headless})`);
-  return withFacebookContext<FacebookPost[]>(headless, async (context) => {
-    const page = await openFacebookPage(context, requestedUrl);
-
-    console.info(`[Facebook] Page opened successfully, looking for up to ${limit} recent posts...`);
-    const permalinks = await collectLatestPostLinks(page, requestedUrl, limit);
-
-    if (permalinks.length === 0) {
-      await dumpDebugPage(page, "no-post-link-found");
-      throw new FacebookError(
-        "EXTRACTION_FAILED",
-        "No se encontró ningún link a una publicación en esta página. Se guardó un volcado en .facebook-debug/ para diagnosticar.",
-        422,
-      );
-    }
-
-    console.info(`[Facebook] ★★★ PRIMER POST detectado (posición 0 de ${permalinks.length}): ${permalinks[0]} ★★★`);
-    console.info(`[Facebook] Lista completa de permalinks detectados: ${JSON.stringify(permalinks, null, 2)}`);
-
-    const posts: FacebookPost[] = [];
-    for (const [index, permalink] of permalinks.entries()) {
-      const post = await extractPostAtPermalink(page, permalink, requestedUrl);
-      if (post) {
-        posts.push(post);
-        if (index === 0) {
-          console.info(
-            `[Facebook] ★★★ PRIMER POST extraído — autor: "${post.author.name ?? "(sin autor)"}", texto: "${(post.text ?? "").slice(0, 80)}${(post.text?.length ?? 0) > 80 ? "..." : ""}", url final: ${post.url} ★★★`,
-          );
-        }
-      }
-    }
-
-    return posts;
-  });
+  return withFacebookContext<FacebookPost[]>(headless, (context) =>
+    getLatestPagePostsInContext(context, input, limit),
+  );
 }
