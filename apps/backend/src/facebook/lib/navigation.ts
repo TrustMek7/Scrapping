@@ -226,6 +226,7 @@ async function collectOrderedTimelinePostLinks(
   pageUrl: string,
   limit: number,
   knownPostUrls: ReadonlySet<string>,
+  firstPostFromTimelineJson: string | null,
   shouldCancel: () => boolean,
 ): Promise<{ links: string[]; reachedKnownPost: boolean; cancelled: boolean }> {
   const pageSegment = extractPageSegment(pageUrl);
@@ -342,9 +343,22 @@ async function collectOrderedTimelinePostLinks(
       new Set(),
       [],
       knownPostUrls,
-      null,
+      firstPostFromTimelineJson,
       shouldCancel,
     );
+  }
+
+  // En el HTML observado, la primera tarjeta (incluidos algunos formatos
+  // multimedia) no expone permalink en el DOM. Relay sí entrega el primer
+  // post de timeline_list_feed_units en orden. Lo anteponemos solamente si
+  // ninguna tarjeta produjo esa misma URL.
+  if (
+    firstPostFromTimelineJson &&
+    !seenUrls.has(firstPostFromTimelineJson) &&
+    !links.includes(firstPostFromTimelineJson)
+  ) {
+    links.unshift(firstPostFromTimelineJson);
+    if (links.length > limit) links.length = limit;
   }
 
   return { links, reachedKnownPost: false, cancelled: false };
@@ -649,6 +663,7 @@ async function collectLatestPostLinks(
     pageUrl,
     limit,
     knownPostUrls,
+    firstFromJson ? canonicalizePostLink(firstFromJson) : null,
     shouldCancel,
   );
 }
