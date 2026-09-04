@@ -88,7 +88,7 @@ const AppHeader: React.FC = () => {
               className="w-8 h-8 rounded-lg object-cover shrink-0"
             />
             <span className="text-base font-semibold text-gray-800 dark:text-white/90">
-              Alertas
+              El mapero
             </span>
           </Link>
 

@@ -18,7 +18,7 @@ const navItems: NavItem[] = [
     subItems: [
       { name: "Alertas", path: "/monitoreo/alertas", pro: false },
       { name: "Fuentes", path: "/monitoreo/fuentes", pro: false },
-      { name: "Entidades", path: "/monitoreo/entidades", pro: false },
+      { name: "Parámetros de búsqueda", path: "/monitoreo/entidades", pro: false },
     ],
   },
 ];
@@ -236,7 +236,7 @@ const AppSidebar: React.FC = () => {
           />
           {(isExpanded || isHovered || isMobileOpen) && (
             <span className="text-lg font-semibold text-gray-800 dark:text-white/90">
-              Alertas
+              El mapero
             </span>
           )}
         </Link>

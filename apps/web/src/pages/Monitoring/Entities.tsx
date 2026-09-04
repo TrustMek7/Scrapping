@@ -81,10 +81,10 @@ export default function Entities() {
     try {
       if (editing) {
         await updateEntity(editing.id, data);
-        toast.success(`Entidad "${form.name}" actualizada.`);
+        toast.success(`Parámetro "${form.name}" actualizado.`);
       } else {
         await createEntity(data);
-        toast.success(`Entidad "${form.name}" creada.`);
+        toast.success(`Parámetro "${form.name}" creado.`);
       }
       setModalOpen(false);
       load();
@@ -111,7 +111,7 @@ export default function Entities() {
     try {
       await deleteEntity(deleteTarget.id);
       setDeleteTarget(null);
-      toast.success(`Entidad "${name}" eliminada.`);
+      toast.success(`Parámetro "${name}" eliminado.`);
       load();
     } catch (err) {
       setDeleteTarget(null);
@@ -121,13 +121,13 @@ export default function Entities() {
 
   return (
     <>
-      <PageMeta title="Entidades | Alertas" description="Entidades monitoreadas por el sistema" />
-      <PageBreadcrumb pageTitle="Entidades" />
+      <PageMeta title="Parámetros de búsqueda | El mapero" description="Parámetros de búsqueda monitoreados por el sistema" />
+      <PageBreadcrumb pageTitle="Parámetros de búsqueda" />
       <div className="space-y-6">
-        <ComponentCard title="Entidades monitoreadas">
+        <ComponentCard title="Parámetros de búsqueda">
           <div className="flex justify-end">
             <Button size="sm" onClick={openCreate}>
-              Nueva entidad
+              Nuevo parámetro
             </Button>
           </div>
 
@@ -139,7 +139,7 @@ export default function Entities() {
           )}
           {!loading && !error && entities.length === 0 && (
             <p className="text-gray-500 dark:text-gray-400">
-              No hay entidades registradas todavía. Creá la primera con "Nueva entidad".
+              No hay parámetros de búsqueda registrados todavía. Creá el primero con "Nuevo parámetro".
             </p>
           )}
           {!loading && !error && entities.length > 0 && (
@@ -197,12 +197,12 @@ export default function Entities() {
 
       <Modal isOpen={modalOpen} onClose={() => setModalOpen(false)} className="max-w-md p-6">
         <h4 className="mb-5 text-lg font-semibold text-gray-800 dark:text-white/90">
-          {editing ? "Editar entidad" : "Nueva entidad"}
+          {editing ? "Editar parámetro" : "Nuevo parámetro"}
         </h4>
         <div className="space-y-4">
           <div>
             <Label htmlFor="entity-name">Nombre</Label>
-            <Input id="entity-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Ej. Partido Renovación" />
+            <Input id="entity-name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Ej. Empresa ACME" />
           </div>
           <div>
             <Label htmlFor="entity-aliases">Alias (separados por coma)</Label>
@@ -210,7 +210,7 @@ export default function Entities() {
               id="entity-aliases"
               value={form.aliasesText}
               onChange={(e) => setForm({ ...form, aliasesText: e.target.value })}
-              placeholder="Ej. PR, Renovación"
+              placeholder="Ej. ACME, ACME Corp"
             />
           </div>
           {formError && <p className="text-sm text-error-500">{formError}</p>}
@@ -227,8 +227,8 @@ export default function Entities() {
 
       <ConfirmDialog
         isOpen={!!deleteTarget}
-        title="Eliminar entidad"
-        message={`¿Eliminar la entidad "${deleteTarget?.name}"? Esto también borra sus alertas asociadas si las hubiera.`}
+        title="Eliminar parámetro"
+        message={`¿Eliminar el parámetro "${deleteTarget?.name}"? Esto también borra sus alertas asociadas si las hubiera.`}
         onConfirm={confirmDelete}
         onCancel={cancelDelete}
       />
