@@ -291,10 +291,11 @@ async function extractImages(page: Page, post: Locator) {
   );
 
   if (candidates.length > 0 && images.length === 0) {
-    throw new FacebookError(
-      "EXTRACTION_FAILED",
-      "Se encontró una imagen, pero no se pudo obtener de Facebook.",
-      422,
+    // La URL CDN puede expirar, exigir cookies adicionales o responder con
+    // un formato no soportado. La imagen es un recurso complementario: no
+    // debe descartar el texto ni detener el resto del timeline.
+    console.warn(
+      `[Facebook] se detectaron ${candidates.length} imagen(es), pero no se pudieron descargar; la publicación continuará sin imágenes.`,
     );
   }
 

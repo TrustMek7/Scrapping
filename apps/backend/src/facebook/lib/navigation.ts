@@ -341,8 +341,22 @@ async function collectOrderedTimelinePostLinks(
     );
 
     if (links.length >= limit || attempt === MAX_SCROLL_ATTEMPTS) break;
-    await page.mouse.wheel(0, SMALL_SCROLL_PX);
-    await page.waitForTimeout(SMALL_SCROLL_WAIT_MS);
+
+    // El timeline no siempre usa el scroll de window. Llevar la ultima
+    // tarjeta al viewport activa el sentinel/lazy-load del feed aunque el
+    // contenido viva dentro de un contenedor desplazable. El wheel posterior
+    // reproduce el avance normal del usuario y deja espacio para la siguiente
+    // tanda.
+    const renderedArticles = root.locator('[role="article"]');
+    const renderedCount = await renderedArticles.count().catch(() => 0);
+    if (renderedCount > 0) {
+      await renderedArticles
+        .nth(renderedCount - 1)
+        .scrollIntoViewIfNeeded({ timeout: 3_000 })
+        .catch(() => undefined);
+    }
+    await page.mouse.wheel(0, SMALL_SCROLL_PX * 2);
+    await page.waitForTimeout(SMALL_SCROLL_WAIT_MS * 2);
   }
 
   // Algunos layouts de video no exponen articles. En esos casos conservamos
