@@ -57,7 +57,7 @@ export class MailService {
 
     try {
       await transporter.sendMail({
-        from: `Alertas Nación <${from}>`,
+        from: `Alertas <${from}>`,
         to,
         subject: `🚨 Alerta ${input.severity} — ${input.entityName} (${input.category})`,
         text: [

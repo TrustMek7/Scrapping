@@ -161,7 +161,7 @@ export default function Sources() {
 
   return (
     <>
-      <PageMeta title="Fuentes | Alertas Nación" description="Fuentes públicas configuradas para el monitor" />
+      <PageMeta title="Fuentes | Alertas" description="Fuentes públicas configuradas para el monitor" />
       <PageBreadcrumb pageTitle="Fuentes" />
       <div className="space-y-6">
         <ComponentCard title="Fuentes registradas">

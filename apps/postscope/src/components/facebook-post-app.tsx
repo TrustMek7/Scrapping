@@ -74,7 +74,7 @@ export function FacebookPostApp() {
       })
       .catch(() => {
         setSourcesError(
-          `No se pudieron cargar las fuentes de Alertas Nación (¿está corriendo el backend en ${SCRAPPING_API_URL}?).`,
+          `No se pudieron cargar las fuentes de Alertas (¿está corriendo el backend en ${SCRAPPING_API_URL}?).`,
         );
       });
   }, []);
@@ -230,7 +230,7 @@ export function FacebookPostApp() {
 
       if (!response.ok) {
         throw new Error(
-          typeof data.message === "string" ? data.message : "No se pudo enviar a Alertas Nación.",
+          typeof data.message === "string" ? data.message : "No se pudo enviar a Alertas.",
         );
       }
 
@@ -239,8 +239,8 @@ export function FacebookPostApp() {
     } catch (sendError) {
       setCaptureError(
         sendError instanceof Error
-          ? `${sendError.message} — ¿está corriendo el backend de Alertas Nación en ${SCRAPPING_API_URL}?`
-          : "No se pudo enviar a Alertas Nación.",
+          ? `${sendError.message} — ¿está corriendo el backend de Alertas en ${SCRAPPING_API_URL}?`
+          : "No se pudo enviar a Alertas.",
       );
       setCaptureStatus("error");
     }
@@ -300,7 +300,7 @@ export function FacebookPostApp() {
 
         <div className="input-row" style={{ marginTop: "1rem" }}>
           <label htmlFor="source-select" style={{ display: "block", marginBottom: "0.4rem" }}>
-            Fuente registrada en Alertas Nación
+            Fuente registrada en Alertas
           </label>
         </div>
         <div className="input-row">
@@ -401,7 +401,7 @@ export function FacebookPostApp() {
                   ? "Enviando..."
                   : captureStatus === "sent"
                     ? "Enviado ✓"
-                    : "Enviar a Alertas Nación"}
+                    : "Enviar a Alertas"}
               </button>
 
               {captureStatus === "error" && captureError && (
@@ -425,7 +425,7 @@ export function FacebookPostApp() {
                       </p>
                       <p>
                         {captureResult.alert
-                          ? "🔴 Se generó una alerta en el dashboard de Alertas Nación."
+                          ? "🔴 Se generó una alerta en el dashboard de Alertas."
                           : "No se generó alerta (no superó los umbrales configurados)."}
                       </p>
                     </>

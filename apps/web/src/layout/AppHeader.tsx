@@ -83,12 +83,12 @@ const AppHeader: React.FC = () => {
 
           <Link to="/" className="flex items-center gap-2 lg:hidden">
             <img
-              src="/images/logo/nacion.jpg"
-              alt="Nación"
+              src="/images/logo/logo.jpg"
+              alt="Logo"
               className="w-8 h-8 rounded-lg object-cover shrink-0"
             />
             <span className="text-base font-semibold text-gray-800 dark:text-white/90">
-              Alertas Nación
+              Alertas
             </span>
           </Link>
 

@@ -352,7 +352,7 @@ const handleExportRecentPublications = async () => {
 };
   return (
     <>
-      <PageMeta title="Alertas | Alertas Nación" description="Alertas generadas por el monitor de publicaciones" />
+      <PageMeta title="Alertas" description="Alertas generadas por el monitor de publicaciones" />
       <PageBreadcrumb pageTitle="Alertas" />
       <div className="space-y-6">
         <ComponentCard title="Revisar Facebook">

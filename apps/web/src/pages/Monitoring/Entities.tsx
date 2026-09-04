@@ -121,7 +121,7 @@ export default function Entities() {
 
   return (
     <>
-      <PageMeta title="Entidades | Alertas Nación" description="Entidades monitoreadas por el sistema" />
+      <PageMeta title="Entidades | Alertas" description="Entidades monitoreadas por el sistema" />
       <PageBreadcrumb pageTitle="Entidades" />
       <div className="space-y-6">
         <ComponentCard title="Entidades monitoreadas">
