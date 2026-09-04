@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import type { Source } from "@prisma/client";
 import type { FacebookPost } from "./lib/types";
+import type { OnPostResult } from "./lib/navigation";
 import { PrismaService } from "../prisma/prisma.service";
 import { AnalysisService } from "../analysis/analysis.service";
 import { checkSession, hasStoredSession, resetSession, startLogin } from "./lib/session";
@@ -81,28 +82,34 @@ export class FacebookService {
       throw new BadRequestException("Esta acción solo está disponible para fuentes de tipo FACEBOOK");
     }
 
-    return this.checkSource(source, (pageUrl) => getLatestPagePosts(pageUrl, limit, headless));
+    return this.checkSource(source, (pageUrl, onPost) => getLatestPagePosts(pageUrl, limit, headless, onPost));
   }
 
   /**
    * Núcleo compartido por `checkLatestFromSource` (una fuente puntual, con
    * su propio navegador) y `checkAllActiveSources` (todas las fuentes en un
    * único navegador reusado) — lo único que cambia entre ambas es CÓMO se
-   * obtienen los posts (`fetchPosts`), no qué se hace con ellos.
+   * recorren los posts (`walkPosts`), no qué se hace con cada uno.
+   *
+   * `walkPosts` entrega cada post apenas se extrae (no espera a tener los
+   * `limit` completos) — así, si Facebook se cae a mitad de una fuente, lo
+   * que ya se analizó/insertó/alertó antes del fallo queda guardado, en vez
+   * de perderse por no haber llegado a "juntar todo" antes de persistir.
    */
   private async checkSource(
     source: Source,
-    fetchPosts: (pageUrl: string) => Promise<FacebookPost[]>,
+    walkPosts: (
+      pageUrl: string,
+      onPost: (post: FacebookPost, index: number) => Promise<OnPostResult>,
+    ) => Promise<void>,
   ): Promise<CheckSourcePostOutcome[]> {
     const outcomes: CheckSourcePostOutcome[] = [];
+    let newCount = 0;
 
     try {
       const pageUrl = normalizeFacebookPageUrl(source.url);
-      const posts = await fetchPosts(pageUrl);
 
-      let newCount = 0;
-
-      for (const post of posts) {
+      await walkPosts(pageUrl, async (post) => {
         if (!post.text || post.text.trim().length === 0) {
           const result = await this.analysisService.persistWithoutText({
             sourceId: source.id,
@@ -115,15 +122,17 @@ export class FacebookService {
             `[FACEBOOK] publicación persistida sin texto (deduplicated=${result.deduplicated}, url=${post.url})`,
           );
           if (!result.deduplicated) newCount += 1;
-          const outcome = {
+          outcomes.push({
             url: post.url,
             ok: false,
             error: "Esta publicación no tiene texto (parece ser solo imagen/video). Todavía no hay OCR configurado.",
-          } satisfies CheckSourcePostOutcome;
-          outcomes.push(outcome);
-          continue;
+          });
+          return { stop: false };
         }
 
+        // Análisis (IA/filtro previo) + persistencia + alerta + correo, todo
+        // acá adentro — cada publicación se procesa de punta a punta antes de
+        // pasar a la siguiente (ver runAndPersist/maybeCreateAlert en AnalysisService).
         const result = await this.analysisService.runAndPersist({
           sourceId: source.id,
           title: `Publicación de ${post.author.name ?? source.name}`,
@@ -132,23 +141,23 @@ export class FacebookService {
           images: post.images,
         });
 
-        const outcome = {
+        outcomes.push({
           url: post.url,
           ok: true,
           deduplicated: result.deduplicated,
           relevant: result.analysis?.relevant ?? null,
           category: result.analysis?.category ?? null,
           alertCreated: !!result.alert,
-        } satisfies CheckSourcePostOutcome;
-        outcomes.push(outcome);
+        });
 
         // Ya llegamos a contenido que se procesó en una revisión anterior —
         // todo lo que sigue en el timeline es más viejo todavía. Frenamos acá
         // para no gastar más navegación/tiempo en posts que ya conocemos.
-        if (result.deduplicated) break;
+        if (result.deduplicated) return { stop: true };
 
         newCount += 1;
-      }
+        return { stop: false };
+      });
 
       await this.prisma.source.update({
         where: { id: source.id },
@@ -209,8 +218,8 @@ export class FacebookService {
       async (context) => {
         for (const source of sources) {
           try {
-            const outcomes = await this.checkSource(source, (pageUrl) =>
-              getLatestPagePostsInContext(context, pageUrl, limit),
+            const outcomes = await this.checkSource(source, (pageUrl, onPost) =>
+              getLatestPagePostsInContext(context, pageUrl, limit, onPost),
             );
             results.push({
               sourceId: source.id,

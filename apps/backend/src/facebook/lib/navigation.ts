@@ -615,13 +615,25 @@ export async function getLatestPagePost(input: unknown) {
   });
 }
 
+/** Lo que el llamador decide hacer después de recibir un post recién extraído. */
+export interface OnPostResult {
+  /** true corta el recorrido de permalinks acá — no se extraen los que faltan. */
+  stop: boolean;
+}
+
 /**
- * Igual que getLatestPagePost(), pero junta hasta `limit` publicaciones
+ * Igual que getLatestPagePost(), pero recorre hasta `limit` publicaciones
  * recientes del timeline en vez de solo la última — para poder revisar de
  * una varias publicaciones nuevas en lugar de tener que hacerlo una por una.
- * El llamador (FacebookService) es responsable de deduplicar contra lo que
- * ya está guardado — acá simplemente se devuelve la lista, en el mismo
- * orden (más reciente primero) en que aparecen en el timeline.
+ *
+ * A propósito NO junta todo en un array para devolverlo al final: cada post
+ * se entrega a `onPost` (que persiste/analiza/alerta) apenas termina de
+ * extraerse, ANTES de navegar al siguiente permalink — así, si Facebook se
+ * cae a mitad de una fuente (post 7 de 10), lo que ya se extrajo y persistió
+ * (posts 1-6) queda guardado igual; con todo junto en un array, un error a
+ * mitad de camino tiraba TODO lo ya scrapeado sin haber persistido nada.
+ * El llamador (FacebookService) decide relevancia/dedup/alerta — acá solo se
+ * entrega cada post, en el mismo orden (más reciente primero) del timeline.
  *
  * Recibe un `BrowserContext` ya abierto (en vez de abrir el suyo propio) para
  * que quien revisa varias fuentes seguidas (`checkAllActiveSources`) pueda
@@ -633,8 +645,9 @@ export async function getLatestPagePost(input: unknown) {
 export async function getLatestPagePostsInContext(
   context: BrowserContext,
   input: unknown,
-  limit = 10,
-): Promise<FacebookPost[]> {
+  limit: number,
+  onPost: (post: FacebookPost, index: number) => Promise<OnPostResult>,
+): Promise<void> {
   const requestedUrl = normalizeFacebookPageUrl(input);
   const page = await openFacebookPage(context, requestedUrl);
 
@@ -653,33 +666,27 @@ export async function getLatestPagePostsInContext(
   console.info(`[Facebook] ★★★ PRIMER POST detectado (posición 0 de ${permalinks.length}): ${permalinks[0]} ★★★`);
   console.info(`[Facebook] Lista completa de permalinks detectados: ${JSON.stringify(permalinks, null, 2)}`);
 
-  const posts: FacebookPost[] = [];
   for (const [index, permalink] of permalinks.entries()) {
     const post = await extractPostAtPermalink(page, permalink, requestedUrl);
-    if (post) {
-      posts.push(post);
-      if (index === 0) {
-        console.info(
-          `[Facebook] ★★★ PRIMER POST extraído — autor: "${post.author.name ?? "(sin autor)"}", texto: "${(post.text ?? "").slice(0, 80)}${(post.text?.length ?? 0) > 80 ? "..." : ""}", url final: ${post.url} ★★★`,
-        );
-      }
-    }
-  }
+    if (!post) continue;
 
-  return posts;
+    const { stop } = await onPost(post, index);
+    if (stop) break;
+  }
 }
 
 export async function getLatestPagePosts(
   input: unknown,
-  limit = 10,
-  headless = true,
-): Promise<FacebookPost[]> {
+  limit: number,
+  headless: boolean,
+  onPost: (post: FacebookPost, index: number) => Promise<OnPostResult>,
+): Promise<void> {
   if (!(await hasStoredSession())) {
     throw new FacebookError("SESSION_REQUIRED", "Necesitas iniciar sesión en Facebook.", 401);
   }
 
   console.info(`[Facebook] Opening page... (headless=${headless})`);
-  return withFacebookContext<FacebookPost[]>(headless, (context) =>
-    getLatestPagePostsInContext(context, input, limit),
+  return withFacebookContext<void>(headless, (context) =>
+    getLatestPagePostsInContext(context, input, limit, onPost),
   );
 }
