@@ -245,17 +245,22 @@ async function collectOrderedTimelinePostLinks(
 
     const articles = await root
       .locator('[role="article"]')
-      .evaluateAll((elements) =>
-        elements
-          // Comentarios y respuestas tambien usan role=article. Solo las
-          // tarjetas superiores son unidades de la linea de tiempo.
-          .filter((element) => !element.parentElement?.closest('[role="article"]'))
-          .map((element) => {
+      .evaluateAll((elements) => {
+        const articleIndexes = new Map(elements.map((element, index) => [element, index] as const));
+        return elements
+          .map((element, index) => {
             const rect = element.getBoundingClientRect();
             return {
+              index,
+              parentIndex:
+                articleIndexes.get(element.parentElement?.closest('[role="article"]') as Element) ?? null,
               top: rect.top + window.scrollY,
               visible: rect.width > 0 && rect.height > 0,
               hrefs: [...element.querySelectorAll<HTMLAnchorElement>('a[href]')]
+                // Un article puede contener otros articles (comentarios). La
+                // tarjeta solo es dueña de los links cuyo article mas cercano
+                // es ella misma; asi no absorbe enlaces de sus descendientes.
+                .filter((anchor) => anchor.closest('[role="article"]') === element)
                 .filter((anchor) => {
                   const anchorRect = anchor.getBoundingClientRect();
                   return anchorRect.width > 0 && anchorRect.height > 0;
@@ -264,20 +269,40 @@ async function collectOrderedTimelinePostLinks(
             };
           })
           .filter((article) => article.visible)
-          .sort((left, right) => left.top - right.top),
-      )
-      .catch(() => [] as { top: number; visible: boolean; hrefs: string[] }[]);
+          .sort((left, right) => left.top - right.top);
+      })
+      .catch(() => [] as { index: number; parentIndex: number | null; top: number; visible: boolean; hrefs: string[] }[]);
 
     if (articles.length > 0) foundTimelineArticles = true;
     let added = 0;
 
+    const candidatesByArticle = new Map(
+      articles.map((article) => [
+        article.index,
+        article.hrefs.filter(
+          (href) =>
+            href &&
+            (isNormalPostLink(href) || isVideoOrLiveLink(href)) &&
+            belongsToPage(href, pageSegment),
+        ),
+      ] as const),
+    );
+
     for (const article of articles) {
-      const candidates = article.hrefs.filter(
-        (href) =>
-          href &&
-          (isNormalPostLink(href) || isVideoOrLiveLink(href)) &&
-          belongsToPage(href, pageSegment),
-      );
+      const candidates = candidatesByArticle.get(article.index) ?? [];
+      // Si un article padre ya tiene permalink propio, los articles internos
+      // son comentarios/respuestas y no nuevas unidades del timeline.
+      let ancestorIndex = article.parentIndex;
+      let nestedInPost = false;
+      while (ancestorIndex !== null) {
+        if ((candidatesByArticle.get(ancestorIndex)?.length ?? 0) > 0) {
+          nestedInPost = true;
+          break;
+        }
+        ancestorIndex = articles.find((item) => item.index === ancestorIndex)?.parentIndex ?? null;
+      }
+      if (nestedInPost) continue;
+
       if (candidates.length === 0) continue;
 
       const aliases = new Set(candidates.map(canonicalizePostLink));
