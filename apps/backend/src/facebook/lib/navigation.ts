@@ -217,6 +217,113 @@ const SMALL_SCROLL_PX = 300;
 const SMALL_SCROLL_WAIT_MS = 600;
 
 /**
+ * Recorre el timeline por tarjetas, tal como se presenta en pantalla. Cada
+ * article superior es una unidad del feed; sus links solo sirven para elegir
+ * el permalink de ESA tarjeta y nunca se mezclan con los de otra.
+ */
+async function collectOrderedTimelinePostLinks(
+  page: Page,
+  pageUrl: string,
+  limit: number,
+  knownPostUrls: ReadonlySet<string>,
+  shouldCancel: () => boolean,
+): Promise<{ links: string[]; reachedKnownPost: boolean; cancelled: boolean }> {
+  const pageSegment = extractPageSegment(pageUrl);
+  const links: string[] = [];
+  const seenUrls = new Set<string>();
+  let foundTimelineArticles = false;
+
+  const root = page.locator('[role="feed"], [role="main"]').first();
+  const deadline = Date.now() + 15_000;
+  while (!shouldCancel() && Date.now() < deadline) {
+    if ((await root.locator('[role="article"]').count().catch(() => 0)) > 0) break;
+    await page.waitForTimeout(250);
+  }
+
+  for (let attempt = 0; attempt <= MAX_SCROLL_ATTEMPTS; attempt++) {
+    if (shouldCancel()) return { links, reachedKnownPost: false, cancelled: true };
+
+    const articles = await root
+      .locator('[role="article"]')
+      .evaluateAll((elements) =>
+        elements
+          // Comentarios y respuestas tambien usan role=article. Solo las
+          // tarjetas superiores son unidades de la linea de tiempo.
+          .filter((element) => !element.parentElement?.closest('[role="article"]'))
+          .map((element) => {
+            const rect = element.getBoundingClientRect();
+            return {
+              top: rect.top + window.scrollY,
+              visible: rect.width > 0 && rect.height > 0,
+              hrefs: [...element.querySelectorAll<HTMLAnchorElement>('a[href]')]
+                .filter((anchor) => {
+                  const anchorRect = anchor.getBoundingClientRect();
+                  return anchorRect.width > 0 && anchorRect.height > 0;
+                })
+                .map((anchor) => anchor.getAttribute('href') ?? ''),
+            };
+          })
+          .filter((article) => article.visible)
+          .sort((left, right) => left.top - right.top),
+      )
+      .catch(() => [] as { top: number; visible: boolean; hrefs: string[] }[]);
+
+    if (articles.length > 0) foundTimelineArticles = true;
+    let added = 0;
+
+    for (const article of articles) {
+      const candidates = article.hrefs.filter(
+        (href) =>
+          href &&
+          (isNormalPostLink(href) || isVideoOrLiveLink(href)) &&
+          belongsToPage(href, pageSegment),
+      );
+      if (candidates.length === 0) continue;
+
+      const aliases = new Set(candidates.map(canonicalizePostLink));
+      if ([...aliases].some((alias) => knownPostUrls.has(alias))) {
+        return { links, reachedKnownPost: true, cancelled: false };
+      }
+      if ([...aliases].some((alias) => seenUrls.has(alias))) continue;
+
+      const preferred = [...candidates].sort(
+        (left, right) => postLinkPriority(right) - postLinkPriority(left),
+      )[0];
+      for (const alias of aliases) seenUrls.add(alias);
+      links.push(canonicalizePostLink(preferred));
+      added += 1;
+      if (links.length >= limit) break;
+    }
+
+    console.info(
+      `[Facebook] scroll ${attempt}/${MAX_SCROLL_ATTEMPTS}: ${articles.length} tarjeta(s) del timeline, ${added} nueva(s) - total ${links.length}/${limit}`,
+    );
+
+    if (links.length >= limit || attempt === MAX_SCROLL_ATTEMPTS) break;
+    await page.mouse.wheel(0, SMALL_SCROLL_PX);
+    await page.waitForTimeout(SMALL_SCROLL_WAIT_MS);
+  }
+
+  // Algunos layouts de video no exponen articles. En esos casos conservamos
+  // el mecanismo anterior como compatibilidad, pero nunca lo mezclamos con
+  // una linea de tiempo que si tenga tarjetas identificables.
+  if (!foundTimelineArticles) {
+    return collectLatestPostLinksFromDom(
+      page,
+      pageUrl,
+      limit,
+      new Set(),
+      [],
+      knownPostUrls,
+      null,
+      shouldCancel,
+    );
+  }
+
+  return { links, reachedKnownPost: false, cancelled: false };
+}
+
+/**
  * Fuente principal: junta, en el mismo orden en que aparecen en pantalla,
  * hasta `limit` links de publicación (normal o video/en vivo mezclados —
  * mezclarlos acá es seguro porque respetamos el orden real del DOM, a
@@ -489,9 +596,6 @@ async function collectLatestPostLinks(
   knownPostUrls: ReadonlySet<string> = new Set(),
   shouldCancel: () => boolean = () => false,
 ): Promise<{ links: string[]; reachedKnownPost: boolean; cancelled: boolean }> {
-  const seen = new Set<string>();
-  const results: string[] = [];
-
   const html = await page.content();
   if (shouldCancel()) return { links: [], reachedKnownPost: false, cancelled: true };
   const firstFromJson = findFirstPostFromTimelineJson(html);
@@ -513,14 +617,11 @@ async function collectLatestPostLinks(
     }
   }
 
-  return collectLatestPostLinksFromDom(
+  return collectOrderedTimelinePostLinks(
     page,
     pageUrl,
     limit,
-    seen,
-    results,
     knownPostUrls,
-    firstFromJson ? canonicalizePostLink(firstFromJson) : null,
     shouldCancel,
   );
 }
