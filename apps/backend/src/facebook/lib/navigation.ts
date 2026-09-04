@@ -246,14 +246,16 @@ async function collectOrderedTimelinePostLinks(
     const articles = await root
       .locator('[role="article"]')
       .evaluateAll((elements) => {
-        const articleIndexes = new Map(elements.map((element, index) => [element, index] as const));
+        const articleIndexes = new Map<Element, number>(
+          elements.map((element, index) => [element, index] as const),
+        );
         return elements
           .map((element, index) => {
             const rect = element.getBoundingClientRect();
+            const parentArticle = element.parentElement?.closest('[role="article"]');
             return {
               index,
-              parentIndex:
-                articleIndexes.get(element.parentElement?.closest('[role="article"]') as Element) ?? null,
+              parentIndex: parentArticle ? articleIndexes.get(parentArticle) ?? null : null,
               top: rect.top + window.scrollY,
               visible: rect.width > 0 && rect.height > 0,
               hrefs: [...element.querySelectorAll<HTMLAnchorElement>('a[href]')]
