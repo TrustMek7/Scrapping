@@ -234,6 +234,19 @@ async function collectOrderedTimelinePostLinks(
   const seenUrls = new Set<string>();
   let foundTimelineArticles = false;
 
+  // Facebook puede pintar la primera tarjeta sin ningun <a> al permalink.
+  // Relay, en cambio, ya entrega esa primera unidad en el orden del timeline.
+  // Registrarla antes del scroll evita esperar 80 intentos mostrando 0/N.
+  if (firstPostFromTimelineJson) {
+    links.push(firstPostFromTimelineJson);
+    seenUrls.add(firstPostFromTimelineJson);
+    console.info(
+      `[Facebook] primera publicacion obtenida desde timeline_list_feed_units: ${firstPostFromTimelineJson}`,
+    );
+  } else {
+    console.info("[Facebook] timeline_list_feed_units no entrego un primer post utilizable");
+  }
+
   const root = page.locator('[role="feed"], [role="main"]').first();
   const deadline = Date.now() + 15_000;
   while (!shouldCancel() && Date.now() < deadline) {
@@ -346,19 +359,6 @@ async function collectOrderedTimelinePostLinks(
       firstPostFromTimelineJson,
       shouldCancel,
     );
-  }
-
-  // En el HTML observado, la primera tarjeta (incluidos algunos formatos
-  // multimedia) no expone permalink en el DOM. Relay sí entrega el primer
-  // post de timeline_list_feed_units en orden. Lo anteponemos solamente si
-  // ninguna tarjeta produjo esa misma URL.
-  if (
-    firstPostFromTimelineJson &&
-    !seenUrls.has(firstPostFromTimelineJson) &&
-    !links.includes(firstPostFromTimelineJson)
-  ) {
-    links.unshift(firstPostFromTimelineJson);
-    if (links.length > limit) links.length = limit;
   }
 
   return { links, reachedKnownPost: false, cancelled: false };
