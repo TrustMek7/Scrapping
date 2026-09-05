@@ -13,7 +13,6 @@ import {
 import Badge from "../../components/ui/badge/Badge";
 import Button from "../../components/ui/button/Button";
 import Select from "../../components/form/Select";
-import Input from "../../components/form/input/InputField";
 import { Modal } from "../../components/ui/modal";
 import ConfirmDialog from "../../components/common/ConfirmDialog";
 import { useToast } from "../../context/ToastContext";
@@ -77,7 +76,6 @@ export default function MonitoringAlerts() {
   const cancelRequestedRef = useRef(false);
   const [checkingAllResults, setCheckingAllResults] = useState<CheckAllSourcesResultItem[]>([]);
   const [checkingAllInitialPublicationCount, setCheckingAllInitialPublicationCount] = useState(0);
-  const [postLimit, setPostLimit] = useState(10);
   const [autoCheck, setAutoCheckState] = useState<AutoCheckStatus | null>(null);
   const [autoCheckPending, setAutoCheckPending] = useState(false);
 
@@ -177,7 +175,7 @@ export default function MonitoringAlerts() {
     setChecking(true);
     setCheckRunning(true);
     try {
-      const outcomes = await checkFacebookSource(selectedSourceId, postLimit, headless);
+      const outcomes = await checkFacebookSource(selectedSourceId, headless);
       console.log("[checkFacebookSource] respuesta del backend:", outcomes);
       if (outcomes[0]) {
         console.log("★★★ [checkFacebookSource] PRIMER POST (posición 0):", outcomes[0]);
@@ -222,7 +220,7 @@ export default function MonitoringAlerts() {
     }, 2000);
 
     try {
-      const results = await checkAllFacebookSources(postLimit);
+      const results = await checkAllFacebookSources();
       setCheckingAllResults(results);
       console.log("[checkAllFacebookSources] respuesta del backend:", results);
       const newPublications = results.reduce((sum, r) => sum + (r.newPublications ?? 0), 0);
@@ -457,21 +455,9 @@ const handleExportRecentPublications = async () => {
                 onChange={setSelectedSourceId}
               />
             </div>
-            <div className="flex items-center gap-2">
-              <label htmlFor="post-limit" className="text-sm text-gray-500 dark:text-gray-400 whitespace-nowrap">
-                Últimas N:
-              </label>
-              <div className="w-20">
-                <Input
-                  id="post-limit"
-                  type="number"
-                  min="1"
-                  max="50"
-                  value={postLimit}
-                  onChange={(e) => setPostLimit(Math.max(1, Math.min(50, Number(e.target.value) || 1)))}
-                />
-              </div>
-            </div>
+            <span className="text-sm text-gray-500 dark:text-gray-400 whitespace-nowrap">
+              Últimas 10 publicaciones
+            </span>
             <Button
               size="sm"
               onClick={() => handleCheckSource(true)}

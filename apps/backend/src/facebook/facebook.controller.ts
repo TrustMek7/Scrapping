@@ -3,11 +3,6 @@ import type { Response } from "express";
 import { FacebookService } from "./facebook.service";
 import { FacebookAutoCheckService } from "./facebook-auto-check.service";
 
-function parseLimit(limit?: string): number | undefined {
-  const parsed = Number(limit);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-}
-
 @Controller("facebook")
 export class FacebookController {
   constructor(
@@ -31,23 +26,22 @@ export class FacebookController {
   }
 
   /**
-   * Revisa hasta `limit` publicaciones nuevas de la Source dada (default 10) y las manda al pipeline de análisis.
+   * Revisa exactamente las 10 publicaciones más recientes y las manda al pipeline de análisis.
    * `?headless=false` abre una ventana de Chromium visible para esta revisión puntual (debug) — el resto
    * (auto-check, revisar todas) siempre corre headless.
    */
   @Post("sources/:id/check")
   async checkSource(
     @Param("id") id: string,
-    @Query("limit") limit?: string,
     @Query("headless") headless?: string,
   ) {
-    return this.facebookService.checkLatestFromSource(id, parseLimit(limit), headless !== "false");
+    return this.facebookService.checkLatestFromSource(id, headless !== "false");
   }
 
   /** Revisa todas las Source de tipo FACEBOOK activas, una por una. El fallo de una no detiene a las demás. */
   @Post("sources/check-all")
-  async checkAllSources(@Query("limit") limit?: string) {
-    return this.facebookService.checkAllActiveSources(parseLimit(limit));
+  async checkAllSources() {
+    return this.facebookService.checkAllActiveSources();
   }
 
   /** Estado de la revisión manual actualmente en ejecución. */

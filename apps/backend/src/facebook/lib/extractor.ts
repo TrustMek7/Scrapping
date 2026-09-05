@@ -52,6 +52,70 @@ function extractVideoId(href: string): string | null {
   }
 }
 
+function contentKind(urlValue: string): FacebookPost["kind"] {
+  const url = new URL(urlValue, "https://www.facebook.com");
+  if (/^\/watch\/live\/?$/.test(url.pathname)) return "LIVE";
+  if (/^\/reel\//.test(url.pathname)) return "REEL";
+  if (/\/videos\//.test(url.pathname) || (/^\/watch\/?$/.test(url.pathname) && url.searchParams.has("v"))) {
+    return "VIDEO";
+  }
+  return "POST";
+}
+
+/** Extrae el caption del JSON de hidratacion, acotado al video/reel actual. */
+async function extractMessageTextFromVideoJson(page: Page): Promise<string | null> {
+  const videoId =
+    extractVideoId(page.url()) ??
+    new URL(page.url()).pathname.match(/^\/reel\/([^/]+)/)?.[1];
+  if (!videoId) return null;
+
+  const html = await page.content();
+  const markers = [
+    `video_id\\":\\"${videoId}`,
+    `video_id":"${videoId}`,
+    `legacy_fbid\\":\\"${videoId}`,
+    `legacy_fbid":"${videoId}`,
+    `"id":"${videoId}"`,
+  ];
+  const markerIndex = markers
+    .map((marker) => html.indexOf(marker))
+    .filter((index) => index >= 0)
+    .sort((left, right) => left - right)[0];
+  if (markerIndex === undefined) return null;
+
+  const scopedHtml = html.slice(markerIndex, markerIndex + 30_000);
+  const keys = ['"message":{"text":"', '\\"message\\":{\\"text\\":\\"'];
+  for (const key of keys) {
+    const textIndex = scopedHtml.indexOf(key);
+    if (textIndex < 0) continue;
+
+    const start = textIndex + key.length;
+    let cursor = start;
+    while (cursor < scopedHtml.length) {
+      if (scopedHtml[cursor] === "\\") {
+        cursor += 2;
+        continue;
+      }
+      if (scopedHtml[cursor] === '"') break;
+      cursor += 1;
+    }
+    if (cursor >= scopedHtml.length) continue;
+
+    try {
+      let encoded = scopedHtml.slice(start, cursor);
+      if (key.startsWith("\\")) {
+        encoded = encoded.replace(/\\\\\"/g, '\"').replace(/\\\\\\\\/g, "\\\\");
+      }
+      const decoded = cleanText(JSON.parse(`"${encoded}"`) as string);
+      if (decoded && !VIDEO_UI_LABELS.has(decoded.toLowerCase())) return decoded;
+    } catch {
+      // Probar el siguiente formato de serializacion.
+    }
+  }
+
+  return null;
+}
+
 /** Rótulos de la interfaz de Facebook para controles de video — no son captions reales. */
 const VIDEO_UI_LABELS = new Set([
   "en reproducción",
@@ -131,6 +195,26 @@ async function extractMessageText(post: Locator, page: Page) {
     if (photoId) {
       const jsonText = await extractMessageTextFromPhotoJson(page, photoId);
       if (jsonText) return jsonText;
+    }
+
+    // En video/reel el texto visible suele estar recortado con "Ver más".
+    // El JSON asociado al id exacto contiene el caption completo y además no
+    // mezcla los videos sugeridos del mismo visor.
+    const videoJsonText = await extractMessageTextFromVideoJson(page);
+    if (videoJsonText) return videoJsonText;
+
+    // En el visor de reels/videos el control puede vivir fuera del bloque
+    // data-ad-preview="message". ExpÃ¡ndelo antes de inspeccionar los captions
+    // alternativos para no devolver literalmente una descripciÃ³n terminada en
+    // "Ver mÃ¡s".
+    const viewerShowMore = post
+      .locator('[role="button"]:visible')
+      .filter({ hasText: /^(Ver m.s|See more)$/i })
+      .first();
+    if (await viewerShowMore.isVisible().catch(() => false)) {
+      await viewerShowMore.click({ force: true }).catch(() => undefined);
+      await viewerShowMore.waitFor({ state: "hidden", timeout: 3_000 }).catch(() => undefined);
+      await page.waitForTimeout(500);
     }
 
     // Transmisiones en vivo (y algunos videos) no ponen el texto en el bloque de
@@ -388,6 +472,7 @@ async function extractFromContainer(
 
   return {
     url: permalink ? new URL(permalink, "https://www.facebook.com").href : fallbackUrl,
+    kind: contentKind(page.url()),
     author: { name: author },
     text: text || null,
     images,

@@ -191,6 +191,27 @@ function canonicalizePostLink(href: string): string {
   return url.href;
 }
 
+function contentKindFromPermalink(href: string): FacebookPost["kind"] {
+  const url = new URL(href, "https://www.facebook.com");
+  if (/^\/watch\/live\/?$/.test(url.pathname)) return "LIVE";
+  if (/^\/reel\//.test(url.pathname)) return "REEL";
+  if (/\/videos\//.test(url.pathname) || (/^\/watch\/?$/.test(url.pathname) && url.searchParams.has("v"))) {
+    return "VIDEO";
+  }
+  return "POST";
+}
+
+/** Identidad estable para no contar dos formatos de URL del mismo post. */
+function postIdentity(href: string): string {
+  const url = new URL(href, "https://www.facebook.com");
+  const id =
+    url.searchParams.get("story_fbid") ??
+    url.searchParams.get("fbid") ??
+    url.searchParams.get("v") ??
+    url.pathname.match(/\/(?:posts|videos|reel)\/([^/]+)/)?.[1];
+  return id ? `facebook:${id}` : canonicalizePostLink(href);
+}
+
 /** Elige el permalink que representa al post, no una foto secundaria dentro de él. */
 function postLinkPriority(href: string): number {
   const url = new URL(href, "https://www.facebook.com");
@@ -211,10 +232,156 @@ function postLinkPriority(href: string): number {
 // vez de eso, scrolleamos en pasos CHICOS y seguidos (como un scroll real de
 // mouse), dejando que el feed cargue de a poco — así el orden de inserción
 // en el DOM tiene más chances de coincidir con el orden visual real.
-const MAX_SCROLL_ATTEMPTS = 80;
+const MAX_SCROLL_ATTEMPTS = 240;
 const SMALL_SCROLL_STEPS = 1;
-const SMALL_SCROLL_PX = 300;
-const SMALL_SCROLL_WAIT_MS = 600;
+const SMALL_SCROLL_PX = 100;
+const SMALL_SCROLL_WAIT_MS = 900;
+
+/**
+ * Facebook ya no siempre usa role="article" para las unidades principales;
+ * en el layout observado ese role se reservó para comentarios. Recorremos
+ * los permalinks visibles de la columna central y conservamos sus identidades
+ * entre repintados del DOM virtualizado.
+ */
+async function collectVisibleTimelinePermalinks(
+  page: Page,
+  pageUrl: string,
+  limit: number,
+  shouldCancel: () => boolean,
+): Promise<{ links: string[]; reachedKnownPost: boolean; cancelled: boolean }> {
+  const pageSegment = extractPageSegment(pageUrl);
+  const links: string[] = [];
+  const seen = new Set<string>();
+  const verticalPositions = new Map<string, number>();
+  const main = page.locator('[role="main"]').first();
+
+  await main.waitFor({ state: "visible", timeout: 15_000 });
+
+  for (let attempt = 0; attempt <= MAX_SCROLL_ATTEMPTS; attempt++) {
+    if (shouldCancel()) return { links, reachedKnownPost: false, cancelled: true };
+
+    const candidates = await main.locator('a[href]').evaluateAll((anchors, currentPageSegment) => {
+      const viewportWidth = window.innerWidth;
+      const mainElement = anchors[0]?.closest('[role="main"]');
+      const effectiveRect = (element: Element) => {
+        const ownRect = element.getBoundingClientRect();
+        if (ownRect.width > 0 && ownRect.height > 0) return ownRect;
+
+        let ancestor = element.parentElement;
+        while (ancestor && ancestor !== mainElement) {
+          const rect = ancestor.getBoundingClientRect();
+          const belongsToRenderedPost = ancestor.querySelector(
+            '[data-ad-preview="message"], [data-ad-comet-preview="message"], [data-video-id]',
+          );
+          if (belongsToRenderedPost && rect.width > 0 && rect.height > 0) return rect;
+          ancestor = ancestor.parentElement;
+        }
+        return ownRect;
+      };
+
+      const linkCandidates = anchors.map((anchor) => {
+          const rect = effectiveRect(anchor);
+          return {
+            href: anchor.getAttribute('href') ?? '',
+            ariaLabel: anchor.getAttribute('aria-label') ?? '',
+            top: rect.top + window.scrollY,
+            left: rect.left,
+            centerX: rect.left + rect.width / 2,
+            visible: rect.width > 0 && rect.height > 0,
+            viewportWidth,
+          };
+        });
+
+      const videoCandidates = mainElement
+        ? [...mainElement.querySelectorAll<HTMLElement>('[data-video-id]')].map((element) => {
+            const rect = element.getBoundingClientRect();
+            const videoId = element.dataset.videoId ?? '';
+            return {
+              href: `https://www.facebook.com/reel/${videoId}/`,
+              ariaLabel: 'data-video-id',
+              top: rect.top + window.scrollY,
+              left: rect.left,
+              centerX: rect.left + rect.width / 2,
+              visible: !!videoId && rect.width > 0 && rect.height > 0,
+              viewportWidth,
+            };
+          })
+        : [];
+
+      const albumPostCandidates = anchors.flatMap((anchor) => {
+        try {
+          const url = new URL(anchor.getAttribute('href') ?? '', 'https://www.facebook.com');
+          const set = url.searchParams.get('set') ?? '';
+          if (!set.startsWith('pcb.')) return [];
+          const postId = set.slice(4);
+          if (!/^\d+$/.test(postId) || !currentPageSegment) return [];
+          let card = anchor.parentElement;
+          while (
+            card &&
+            card !== mainElement &&
+            !card.querySelector('[data-ad-preview="message"], [data-ad-comet-preview="message"]')
+          ) {
+            card = card.parentElement;
+          }
+          if (!card || card === mainElement) return [];
+          if (card.querySelector('a[href*="/posts/"], a[href*="story_fbid"]')) return [];
+
+          const rect = card.getBoundingClientRect();
+          return [{
+            href: `https://www.facebook.com/${currentPageSegment}/posts/${postId}/`,
+            ariaLabel: 'photo-set-pcb',
+            top: rect.top + window.scrollY,
+            left: rect.left,
+            centerX: rect.left + rect.width / 2,
+            visible: rect.width > 0 && rect.height > 0,
+            viewportWidth,
+          }];
+        } catch {
+          return [];
+        }
+      });
+
+      return [...linkCandidates, ...videoCandidates, ...albumPostCandidates]
+        .filter((item) => item.visible)
+        .sort((left, right) => left.top - right.top || left.left - right.left);
+    }, pageSegment);
+
+    let added = 0;
+    for (const candidate of candidates) {
+      if (!(isNormalPostLink(candidate.href) || isVideoOrLiveLink(candidate.href))) continue;
+      if (!belongsToPage(candidate.href, pageSegment)) continue;
+      if (candidate.viewportWidth >= 900 && candidate.centerX < candidate.viewportWidth * 0.35) continue;
+      if (/foto de portada del perfil|profile cover photo/i.test(candidate.ariaLabel)) continue;
+
+      const identity = postIdentity(candidate.href);
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      verticalPositions.set(identity, candidate.top);
+      links.push(canonicalizePostLink(candidate.href));
+      links.sort(
+        (left, right) =>
+          (verticalPositions.get(postIdentity(left)) ?? Number.MAX_SAFE_INTEGER) -
+          (verticalPositions.get(postIdentity(right)) ?? Number.MAX_SAFE_INTEGER),
+      );
+      added += 1;
+      if (links.length >= limit) break;
+    }
+
+    console.info(
+      `[Facebook] scroll visual ${attempt}/${MAX_SCROLL_ATTEMPTS}: ${candidates.length} enlaces visibles, ${added} publicación(es) nueva(s) - total ${links.length}/${limit}`,
+    );
+
+    if (links.length >= limit || attempt === MAX_SCROLL_ATTEMPTS) break;
+    await page.mouse.move(
+      Math.round((await page.evaluate(() => window.innerWidth)) * 0.65),
+      Math.round((await page.evaluate(() => window.innerHeight)) * 0.65),
+    );
+    await page.mouse.wheel(0, SMALL_SCROLL_PX);
+    await page.waitForTimeout(SMALL_SCROLL_WAIT_MS);
+  }
+
+  return { links, reachedKnownPost: false, cancelled: false };
+}
 
 /**
  * Recorre el timeline por tarjetas, tal como se presenta en pantalla. Cada
@@ -239,7 +406,7 @@ async function collectOrderedTimelinePostLinks(
   // Registrarla antes del scroll evita esperar 80 intentos mostrando 0/N.
   if (firstPostFromTimelineJson) {
     links.push(firstPostFromTimelineJson);
-    seenUrls.add(firstPostFromTimelineJson);
+    seenUrls.add(postIdentity(firstPostFromTimelineJson));
     console.info(
       `[Facebook] primera publicacion obtenida desde timeline_list_feed_units: ${firstPostFromTimelineJson}`,
     );
@@ -291,6 +458,7 @@ async function collectOrderedTimelinePostLinks(
 
     if (articles.length > 0) foundTimelineArticles = true;
     let added = 0;
+    let lastTimelineArticleIndex: number | null = null;
 
     const candidatesByArticle = new Map(
       articles.map((article) => [
@@ -320,11 +488,9 @@ async function collectOrderedTimelinePostLinks(
       if (nestedInPost) continue;
 
       if (candidates.length === 0) continue;
+      lastTimelineArticleIndex = article.index;
 
-      const aliases = new Set(candidates.map(canonicalizePostLink));
-      if ([...aliases].some((alias) => knownPostUrls.has(alias))) {
-        return { links, reachedKnownPost: true, cancelled: false };
-      }
+      const aliases = new Set(candidates.map(postIdentity));
       if ([...aliases].some((alias) => seenUrls.has(alias))) continue;
 
       const preferred = [...candidates].sort(
@@ -348,15 +514,14 @@ async function collectOrderedTimelinePostLinks(
     // reproduce el avance normal del usuario y deja espacio para la siguiente
     // tanda.
     const renderedArticles = root.locator('[role="article"]');
-    const renderedCount = await renderedArticles.count().catch(() => 0);
-    if (renderedCount > 0) {
+    if (lastTimelineArticleIndex !== null) {
       await renderedArticles
-        .nth(renderedCount - 1)
+        .nth(lastTimelineArticleIndex)
         .scrollIntoViewIfNeeded({ timeout: 3_000 })
         .catch(() => undefined);
     }
-    await page.mouse.wheel(0, SMALL_SCROLL_PX * 2);
-    await page.waitForTimeout(SMALL_SCROLL_WAIT_MS * 2);
+    await page.mouse.wheel(0, SMALL_SCROLL_PX);
+    await page.waitForTimeout(SMALL_SCROLL_WAIT_MS);
   }
 
   // Algunos layouts de video no exponen articles. En esos casos conservamos
@@ -502,10 +667,10 @@ async function collectLatestPostLinksFromDom(
         const key = candidate.articleKey ?? `link:${canonical}`;
         const previous = candidatesByPost.get(key);
         if (!previous) {
-          candidatesByPost.set(key, { preferred: candidate, aliases: new Set([canonical]) });
+          candidatesByPost.set(key, { preferred: candidate, aliases: new Set([postIdentity(canonical)]) });
           continue;
         }
-        previous.aliases.add(canonical);
+        previous.aliases.add(postIdentity(canonical));
         if (postLinkPriority(candidate.href) > postLinkPriority(previous.preferred.href)) {
           previous.preferred = candidate;
         }
@@ -523,7 +688,7 @@ async function collectLatestPostLinksFromDom(
         const firstVisibleArticle = anchorData.find(({ articleKey }) => articleKey)?.articleKey;
         const firstPostArticle = postCandidates.find(([key]) => key.startsWith("article:"))?.[0];
         if (!firstVisibleArticle || firstVisibleArticle !== firstPostArticle) {
-          seen.add(firstPostFromJson);
+          seen.add(postIdentity(firstPostFromJson));
           results.push(firstPostFromJson);
           newMatchesThisPass += 1;
           console.info(`[Facebook] Primer post completado desde el JSON ordenado: ${firstPostFromJson}`);
@@ -534,16 +699,11 @@ async function collectLatestPostLinksFromDom(
         if (results.length >= limit) break;
         if (seenPostContainers.has(postKey)) continue;
 
-        if ([...aliases].some((alias) => knownPostUrls.has(alias))) {
-          seenPostContainers.add(postKey);
-          reachedKnownPost = true;
-          break;
-        }
         if (![...aliases].some((alias) => seen.has(alias))) {
           const canonical = canonicalizePostLink(preferred.href);
           seenPostContainers.add(postKey);
           for (const alias of aliases) seen.add(alias);
-          seen.add(canonical);
+          seen.add(postIdentity(canonical));
           results.push(canonical);
           newMatchesThisPass += 1;
         }
@@ -620,22 +780,6 @@ async function collectLatestPostLinksFromDom(
  * timeline: edges[0] es, con evidencia de su propio nombre en el código de
  * Facebook, el primer elemento de esa lista — no un fallback ambiguo.
  */
-function findFirstPostFromTimelineJson(html: string): string | null {
-  const marker = '"timeline_list_feed_units":{"edges":[{"node":{';
-  const markerIndex = html.indexOf(marker);
-  if (markerIndex === -1) return null;
-
-  const before = html.slice(Math.max(0, markerIndex - 60), markerIndex);
-  const pageIdMatch = before.match(/"id":"(\d+)",$/);
-  if (!pageIdMatch) return null;
-
-  const after = html.slice(markerIndex, markerIndex + 3_000);
-  const postIdMatch = after.match(/"post_id":"(\d+)"/);
-  if (!postIdMatch) return null;
-
-  return `https://www.facebook.com/permalink.php?story_fbid=${postIdMatch[1]}&id=${pageIdMatch[1]}`;
-}
-
 /**
  * "Obtener el/los último(s) post(s), y de ahí seguir las reglas": primero se
  * intenta conseguir el post #1 desde el JSON ordenado del feed (ver arriba
@@ -651,9 +795,7 @@ async function collectLatestPostLinks(
   knownPostUrls: ReadonlySet<string> = new Set(),
   shouldCancel: () => boolean = () => false,
 ): Promise<{ links: string[]; reachedKnownPost: boolean; cancelled: boolean }> {
-  const html = await page.content();
   if (shouldCancel()) return { links: [], reachedKnownPost: false, cancelled: true };
-  const firstFromJson = findFirstPostFromTimelineJson(html);
 
   // Ojo: NO pasa por belongsToPage() acá a propósito. Ese chequeo compara
   // contra el slug de la URL configurada (ej. "colegiolasallejuliaca"), pero
@@ -664,22 +806,7 @@ async function collectLatestPostLinks(
   // falta ese chequeo igual: el id numérico salió del propio "user.id" que
   // encabeza esta consulta puntual, no de una búsqueda ciega — ya está
   // scopeado a la página correcta por construcción.
-  if (firstFromJson) {
-    const canonical = canonicalizePostLink(firstFromJson);
-    if (knownPostUrls.has(canonical)) {
-      console.info(`[Facebook] La publicación más reciente ya fue procesada: ${canonical}`);
-      return { links: [], reachedKnownPost: true, cancelled: false };
-    }
-  }
-
-  return collectOrderedTimelinePostLinks(
-    page,
-    pageUrl,
-    limit,
-    knownPostUrls,
-    firstFromJson ? canonicalizePostLink(firstFromJson) : null,
-    shouldCancel,
-  );
+  return collectVisibleTimelinePermalinks(page, pageUrl, limit, shouldCancel);
 }
 
 // Cuando se reusa un mismo contexto/página entre varias fuentes (ver
@@ -795,7 +922,33 @@ async function extractPostAtPermalink(
   // videos: si la publicación es un video, igual devolvemos su texto/caption
   // (si tiene) e ignoramos el video en sí.
   const extractionStartedAt = Date.now();
-  const post = await extractFacebookPost(page);
+  let post = await extractFacebookPost(page);
+  const reelId = permalink.match(/\/reel\/(\d+)/i)?.[1];
+  const textIsTruncated = /(?:\u2026|\.\.\.)\s*(?:Ver m.s|See more)$/i.test(post.text?.trim() ?? "");
+
+  // A reel can expose a different, complete caption in the classic video
+  // viewer. Use it only as a reading fallback and keep the canonical reel URL.
+  if (reelId && textIsTruncated) {
+    const pageSlug = new URL(requestedUrl).pathname.split("/").filter(Boolean)[0];
+    const videoUrl = pageSlug
+      ? `https://www.facebook.com/${pageSlug}/videos/${reelId}/`
+      : `https://www.facebook.com/videos/${reelId}/`;
+
+    console.info(`[Facebook] Reel recortado; probando visor de video: ${videoUrl}`);
+    const videoResponse = await page.goto(videoUrl, { waitUntil: "domcontentloaded" });
+    if (!videoResponse || videoResponse.status() < 400) {
+      const videoPost = await extractFacebookPost(page).catch(() => null);
+      const videoText = videoPost?.text?.trim() ?? "";
+      const videoIsTruncated = /(?:\u2026|\.\.\.)\s*(?:Ver m.s|See more)$/i.test(videoText);
+      const originalLength = post.text?.trim().length ?? 0;
+      // A non-truncated short string can just be a player label/title. Never
+      // replace the reel caption unless the alternate viewer actually yields
+      // more text, and prefer a complete result when it does.
+      if (videoText.length > originalLength && (!videoIsTruncated || textIsTruncated)) {
+        post = { ...post, text: videoText };
+      }
+    }
+  }
   console.info(`[Facebook][tiempo] extraer publicación: ${Date.now() - extractionStartedAt} ms`);
 
   if (DEBUG_DUMPS_ENABLED && (!post.text || post.text.trim().length === 0)) {
@@ -806,7 +959,11 @@ async function extractPostAtPermalink(
     await dumpDebugPage(page, "no-text-found");
   }
 
-  return { ...post, url: normalizeVideoPermalink(permalink, requestedUrl) };
+  return {
+    ...post,
+    url: normalizeVideoPermalink(permalink, requestedUrl),
+    kind: contentKindFromPermalink(permalink),
+  };
 }
 
 export async function getFacebookPost(input: unknown) {
@@ -961,16 +1118,17 @@ export async function getLatestPagePostsInContext(
   const normalizedKnownUrls = new Set(
     [...knownPostUrls].map((url) => canonicalizePostLink(url)),
   );
+  const discoveryLimit = limit * 2;
   const discoveryStartedAt = Date.now();
   const { links: permalinks, reachedKnownPost, cancelled } = await collectLatestPostLinks(
     page,
     requestedUrl,
-    limit,
+    discoveryLimit,
     normalizedKnownUrls,
     shouldCancel,
   );
   console.info(
-    `[Facebook][tiempo] descubrir enlaces: ${Date.now() - discoveryStartedAt} ms (${permalinks.length} nuevo(s))`,
+    `[Facebook][tiempo] descubrir enlaces: ${Date.now() - discoveryStartedAt} ms (${permalinks.length}/${discoveryLimit} candidatos)`,
   );
 
   if (permalinks.length === 0) {
@@ -984,17 +1142,61 @@ export async function getLatestPagePostsInContext(
     );
   }
 
+  if (!cancelled && permalinks.length < limit) {
+    await dumpDebugPage(page, `incomplete-latest-${permalinks.length}-of-${limit}`);
+    throw new FacebookError(
+      "EXTRACTION_FAILED",
+      `Facebook solo expuso ${permalinks.length} de las ${limit} publicaciones requeridas. No se procesó una lista incompleta y se guardó un diagnóstico en .facebook-debug/.`,
+      422,
+    );
+  }
+
   console.info(`[Facebook] ★★★ PRIMER POST detectado (posición 0 de ${permalinks.length}): ${permalinks[0]} ★★★`);
   console.info(`[Facebook] Lista completa de permalinks detectados: ${JSON.stringify(permalinks, null, 2)}`);
 
-  for (const [index, permalink] of permalinks.entries()) {
+  let delivered = 0;
+  let pendingPost: FacebookPost | null = null;
+  let pendingText: string | null = null;
+  let stopped = false;
+  for (const permalink of permalinks) {
     if (shouldCancel()) return;
     const post = await extractPostAtPermalink(page, permalink, requestedUrl);
     if (!post) continue;
     if (shouldCancel()) return;
 
-    const { stop } = await onPost(post, index);
-    if (stop) break;
+    const currentText = post.text?.replace(/\s+/g, " ").trim() || null;
+    if (pendingPost && currentText && pendingText === currentText) {
+      // Si una tarjeta ofrece primero el id numérico sintetizado desde `pcb`
+      // y después su permalink pfbid real, conservamos el permalink real.
+      if (/\/posts\/pfbid/i.test(post.url)) pendingPost = post;
+      console.info(`[Facebook] variantes de una misma tarjeta unificadas: ${permalink}`);
+      continue;
+    }
+
+    if (pendingPost) {
+      const { stop } = await onPost(pendingPost, delivered);
+      delivered += 1;
+      if (stop || delivered >= limit) {
+        stopped = true;
+        break;
+      }
+    }
+
+    pendingPost = post;
+    pendingText = currentText;
+  }
+
+  if (!stopped && pendingPost && delivered < limit) {
+    await onPost(pendingPost, delivered);
+    delivered += 1;
+  }
+
+  if (!shouldCancel() && delivered < limit) {
+    throw new FacebookError(
+      "EXTRACTION_FAILED",
+      `Solo se pudieron extraer ${delivered} publicaciones únicas de las ${limit} requeridas.`,
+      422,
+    );
   }
 }
 

@@ -1,6 +1,6 @@
 import { AnalysisInput } from "../ai-provider.interface";
 
-export const ANALYZE_PROMPT_VERSION = "v1";
+export const ANALYZE_PROMPT_VERSION = "v2";
 
 const CATEGORIES = [
   "POSITIVE",
@@ -30,6 +30,25 @@ Analiza únicamente el contenido proporcionado.
 Determina si la publicación es relevante para alguna de las entidades monitoreadas.
 
 Clasifica el contenido utilizando exclusivamente las categorías disponibles: ${CATEGORIES.join(", ")}.
+
+Usa estas definiciones:
+- POSITIVE: mención favorable, apoyo, reconocimiento o logro.
+- NEUTRAL: mención informativa o descriptiva sin valoración clara.
+- CRITICISM: juicio negativo, cuestionamiento o desaprobación.
+- COMPLAINT: reclamo por un problema, perjuicio, incumplimiento o servicio deficiente.
+- ALLEGATION: atribución de una conducta indebida que no está presentada como comprobada.
+- DENUNCIA: acusación pública o formal que expone hechos y pide atención, investigación o sanción.
+- SCANDAL: controversia pública grave o de alto impacto reputacional.
+- OTHER_RELEVANT: mención relevante que no encaja correctamente en las anteriores.
+- IRRELEVANT: no existe relación real con ninguna entidad monitoreada.
+
+Una mención relevante, directa o indirecta, puede ser POSITIVE, NEUTRAL o negativa.
+No marques IRRELEVANT solo porque el tono no sea negativo.
+
+Asigna severidad según el impacto del contenido, no según la mera presencia del nombre:
+- LOW: mención positiva, neutral o de impacto limitado.
+- MEDIUM: crítica, queja o controversia con impacto apreciable.
+- HIGH: denuncia, acusación grave o escándalo con riesgo significativo.
 
 Genera un resumen breve, neutral y fiel al contenido original.
 

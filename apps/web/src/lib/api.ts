@@ -111,12 +111,58 @@ export const deleteEntity = (id: string) =>
 
 export type FacebookSessionStatus = "active" | "required" | "expired";
 
-export const fetchFacebookSession = () =>
-  request<{ status: FacebookSessionStatus }>("/facebook/session");
-export const loginFacebook = () =>
-  request<{ status: FacebookSessionStatus }>("/facebook/session", { method: "POST" });
-export const logoutFacebook = () =>
-  request<{ status: FacebookSessionStatus }>("/facebook/session", { method: "DELETE" });
+const FACEBOOK_SESSION_CACHE_KEY = "facebook-session-status";
+const FACEBOOK_SESSION_CACHE_TTL_MS = 5 * 60 * 1000;
+
+interface FacebookSessionCache {
+  status: FacebookSessionStatus;
+  checkedAt: number;
+}
+
+function readFacebookSessionCache(): FacebookSessionStatus | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(FACEBOOK_SESSION_CACHE_KEY);
+    if (!raw) return null;
+    const cached = JSON.parse(raw) as FacebookSessionCache;
+    if (Date.now() - cached.checkedAt >= FACEBOOK_SESSION_CACHE_TTL_MS) {
+      window.localStorage.removeItem(FACEBOOK_SESSION_CACHE_KEY);
+      return null;
+    }
+    return cached.status;
+  } catch {
+    window.localStorage.removeItem(FACEBOOK_SESSION_CACHE_KEY);
+    return null;
+  }
+}
+
+function writeFacebookSessionCache(status: FacebookSessionStatus) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(
+    FACEBOOK_SESSION_CACHE_KEY,
+    JSON.stringify({ status, checkedAt: Date.now() } satisfies FacebookSessionCache),
+  );
+}
+
+export const fetchFacebookSession = async (force = false) => {
+  const cached = force ? null : readFacebookSessionCache();
+  if (cached) return { status: cached };
+  const result = await request<{ status: FacebookSessionStatus }>("/facebook/session");
+  writeFacebookSessionCache(result.status);
+  return result;
+};
+
+export const loginFacebook = async () => {
+  const result = await request<{ status: FacebookSessionStatus }>("/facebook/session", { method: "POST" });
+  writeFacebookSessionCache(result.status);
+  return result;
+};
+
+export const logoutFacebook = async () => {
+  const result = await request<{ status: FacebookSessionStatus }>("/facebook/session", { method: "DELETE" });
+  writeFacebookSessionCache(result.status);
+  return result;
+};
 
 export interface AutoCheckStatus {
   enabled: boolean;
@@ -134,6 +180,9 @@ export const setAutoCheck = (enabled: boolean, intervalMinutes?: number) =>
 /** Revisar una fuente ahora trae hasta N publicaciones nuevas (no solo la última), una entrada por post. */
 export interface CheckSourcePostOutcome {
   url: string;
+  kind: "POST" | "VIDEO" | "REEL" | "LIVE";
+  textLength: number;
+  textTruncated: boolean;
   ok: boolean;
   error?: string;
   deduplicated?: boolean;
@@ -142,9 +191,8 @@ export interface CheckSourcePostOutcome {
   alertCreated?: boolean;
 }
 
-export const checkFacebookSource = (sourceId: string, limit?: number, headless = true) => {
+export const checkFacebookSource = (sourceId: string, headless = true) => {
   const params = new URLSearchParams();
-  if (limit) params.set("limit", String(limit));
   if (!headless) params.set("headless", "false");
   const qs = params.toString();
   return request<CheckSourcePostOutcome[]>(
@@ -162,9 +210,9 @@ export interface CheckAllSourcesResultItem {
   newAlerts?: number;
 }
 
-export const checkAllFacebookSources = (limit?: number) =>
+export const checkAllFacebookSources = () =>
   request<CheckAllSourcesResultItem[]>(
-    `/facebook/sources/check-all${limit ? `?limit=${limit}` : ""}`,
+    "/facebook/sources/check-all",
     { method: "POST" },
   );
 

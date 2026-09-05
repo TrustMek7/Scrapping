@@ -7,6 +7,7 @@ export interface FacebookPostImage {
 
 export interface FacebookPost {
   url: string;
+  kind: "POST" | "VIDEO" | "REEL" | "LIVE";
   author: {
     name: string | null;
   };

@@ -156,47 +156,26 @@ export class AnalysisService {
 
     let result: AnalysisResult;
 
-    // Filtro previo (sin IA): si hay entidades registradas y ni su nombre ni
-    // ningún alias aparece, ni remotamente, en el texto, no vale la pena
-    // pagar la llamada a la IA — no puede ser relevante para ninguna de
-    // ellas. Riesgo asumido: una mención indirecta (apodo, alias no
-    // registrado) no dispara la IA y por lo tanto no genera alerta; con cero
-    // entidades registradas seguimos mandando todo a la IA como antes.
-    if (monitoredEntities.length > 0 && !this.mentionsAnyMonitoredEntity(input.content, monitoredEntities)) {
-      this.logger.log(
-        `[ANALYSIS] filtro previo: ninguna entidad monitoreada mencionada, se omite la IA (publicationId=${publication.id})`,
-      );
-      result = {
-        relevant: false,
-        entities: [],
-        category: "IRRELEVANT",
-        severity: "LOW",
-        confidence: 0,
-        summary: "Ninguna entidad monitoreada aparece mencionada en el texto.",
-        reason:
-          "Filtro previo por palabras clave: ni el nombre ni los alias de ninguna entidad monitoreada aparecen en el contenido, se omitió el análisis con IA.",
-        claims: [],
-      };
-    } else {
-      try {
-        result = await this.aiProvider.analyze({
-          title: input.title,
-          content: input.content,
-          sourceName: source.name,
-          publishedAt: input.publishedAt,
-          monitoredEntities: monitoredEntities.map((e) => ({ name: e.name, aliases: e.aliases })),
-        });
-      } catch (error) {
-        this.logger.error(`[ANALYSIS] falló el análisis: ${(error as Error).message}`);
-        const analysis = await this.prisma.analysis.create({
-          data: {
-            publicationId: publication.id,
-            status: "FAILED",
-            error: (error as Error).message,
-          },
-        });
-        return { publication, analysis, alert: null, deduplicated: false };
-      }
+    // Toda publicación nueva con texto pasa por la IA. Un filtro literal por
+    // nombre o alias perdería referencias indirectas, cargos y apodos.
+    try {
+      result = await this.aiProvider.analyze({
+        title: input.title,
+        content: input.content,
+        sourceName: source.name,
+        publishedAt: input.publishedAt,
+        monitoredEntities: monitoredEntities.map((e) => ({ name: e.name, aliases: e.aliases })),
+      });
+    } catch (error) {
+      this.logger.error(`[ANALYSIS] falló el análisis: ${(error as Error).message}`);
+      const analysis = await this.prisma.analysis.create({
+        data: {
+          publicationId: publication.id,
+          status: "FAILED",
+          error: (error as Error).message,
+        },
+      });
+      return { publication, analysis, alert: null, deduplicated: false };
     }
 
     const analysis = await this.prisma.analysis.create({
@@ -348,7 +327,7 @@ export class AnalysisService {
       .split(",")
       .map((c) => c.trim())
       .filter(Boolean);
-    const minConfidence = Number(this.config.get<string>("ALERT_MIN_CONFIDENCE") ?? "0.7");
+    const minConfidence = Number(this.config.get<string>("ALERT_MIN_CONFIDENCE") ?? "0.6");
 
     if (!alertCategories.includes(result.category)) return null;
     if (result.confidence < minConfidence) return null;
@@ -400,26 +379,4 @@ export class AnalysisService {
     );
   }
 
-  /** minúsculas + sin tildes, para que "Nación" matchee "nacion" y viceversa. */
-  private static readonly DIACRITICS_PATTERN = new RegExp("[\\u0300-\\u036f]", "g");
-
-  private static normalizeForMatch(text: string): string {
-    return text
-      .normalize("NFD")
-      .replace(AnalysisService.DIACRITICS_PATTERN, "")
-      .toLowerCase();
-  }
-
-  private mentionsAnyMonitoredEntity(
-    content: string,
-    monitoredEntities: { name: string; aliases: string[] }[],
-  ): boolean {
-    const normalizedContent = AnalysisService.normalizeForMatch(content);
-    return monitoredEntities.some((entity) =>
-      [entity.name, ...entity.aliases].some((candidate) => {
-        const normalized = AnalysisService.normalizeForMatch(candidate).trim();
-        return normalized.length > 0 && normalizedContent.includes(normalized);
-      }),
-    );
-  }
 }

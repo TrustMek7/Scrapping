@@ -10,7 +10,7 @@ import { withFacebookContext } from "./lib/browser";
 import { normalizeFacebookPageUrl } from "./lib/validators";
 import { getFacebookImage } from "./lib/image-cache";
 
-const DEFAULT_POST_LIMIT = 10;
+const REQUIRED_POST_LIMIT = 10;
 // Overhead fijo de arrancar/cerrar Chromium para UNA fuente (referencia para
 // dimensionar el margen del lote entero en checkAllActiveSources).
 const PER_SOURCE_TIMEOUT_MS = 90 * 1000;
@@ -18,6 +18,9 @@ const MIN_BATCH_TIMEOUT_MS = 11 * 60 * 1000;
 
 export interface CheckSourcePostOutcome {
   url: string;
+  kind: FacebookPost["kind"];
+  textLength: number;
+  textTruncated: boolean;
   ok: boolean;
   error?: string;
   deduplicated?: boolean;
@@ -99,7 +102,6 @@ export class FacebookService {
    */
   async checkLatestFromSource(
     sourceId: string,
-    limit = DEFAULT_POST_LIMIT,
     headless = true,
   ): Promise<CheckSourcePostOutcome[]> {
     const source = await this.prisma.source.findUnique({ where: { id: sourceId } });
@@ -115,7 +117,7 @@ export class FacebookService {
       return await this.checkSource(
         source,
         (pageUrl, onPost, knownPostUrls, shouldCancel) =>
-          getLatestPagePosts(pageUrl, limit, headless, onPost, knownPostUrls, shouldCancel),
+          getLatestPagePosts(pageUrl, REQUIRED_POST_LIMIT, headless, onPost, knownPostUrls, shouldCancel),
         () => check.cancellationRequested,
       );
     } finally {
@@ -182,6 +184,9 @@ export class FacebookService {
           if (!result.deduplicated) newCount += 1;
           outcomes.push({
             url: post.url,
+            kind: post.kind,
+            textLength: 0,
+            textTruncated: false,
             ok: false,
             error: "Esta publicación no tiene texto (parece ser solo imagen/video). Todavía no hay OCR configurado.",
           });
@@ -205,6 +210,9 @@ export class FacebookService {
 
         outcomes.push({
           url: post.url,
+          kind: post.kind,
+          textLength: post.text.length,
+          textTruncated: /(?:…|\.\.\.)\s*(?:Ver más|See more)$/i.test(post.text.trim()),
           ok: true,
           deduplicated: result.deduplicated,
           relevant: result.analysis?.relevant ?? null,
@@ -212,12 +220,7 @@ export class FacebookService {
           alertCreated: !!result.alert,
         });
 
-        // Ya llegamos a contenido que se procesó en una revisión anterior —
-        // todo lo que sigue en el timeline es más viejo todavía. Frenamos acá
-        // para no gastar más navegación/tiempo en posts que ya conocemos.
-        if (result.deduplicated) return { stop: true };
-
-        newCount += 1;
+        if (!result.deduplicated) newCount += 1;
         return { stop: false };
       }, knownPostUrls, shouldCancel);
 
@@ -262,9 +265,7 @@ export class FacebookService {
    * cierra el navegador — cada resultado (éxito o error) se acumula y se
    * devuelve al final.
    */
-  async checkAllActiveSources(
-    limit = DEFAULT_POST_LIMIT,
-  ): Promise<CheckAllSourcesResultItem[]> {
+  async checkAllActiveSources(): Promise<CheckAllSourcesResultItem[]> {
     const sources = await this.prisma.source.findMany({
       where: { type: "FACEBOOK", status: "ACTIVE" },
     });
@@ -293,7 +294,7 @@ export class FacebookService {
                   getLatestPagePostsInContext(
                     context,
                     pageUrl,
-                    limit,
+                    REQUIRED_POST_LIMIT,
                     onPost,
                     knownPostUrls,
                     shouldCancel,
