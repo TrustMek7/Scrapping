@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { createHash } from "node:crypto";
-import { AnalysisResult, SourceType } from "@scrapping/shared";
+import { AnalysisResult, AnalysisResultSchema, SourceType } from "@scrapping/shared";
 import { PrismaService } from "../prisma/prisma.service";
 import { AI_PROVIDER, AIProvider, AnalysisInput, MonitoredEntityInput } from "./ai-provider.interface";
 import { MailService } from "../notifications/mail.service";
@@ -129,7 +129,39 @@ export class AnalysisService {
           })
         : existing;
 
-      return { publication, analysis: await this.prisma.analysis.findUnique({ where: { publicationId: existing.id } }), alert: null, deduplicated: true };
+      const analysis = await this.prisma.analysis.findUnique({ where: { publicationId: existing.id } });
+      let alert = analysis
+        ? await this.prisma.alert.findUnique({ where: { analysisId: analysis.id } })
+        : null;
+
+      // Una ejecución anterior pudo analizar correctamente la publicación pero
+      // no crear la alerta porque el nombre devuelto por la IA no resolvía la
+      // entidad (por ejemplo, "Ángel" frente a "Angel"). Al reintentar, reutiliza
+      // el resultado ya validado y crea únicamente la alerta pendiente, sin
+      // volver a consumir DeepSeek y sin duplicar alertas existentes.
+      if (!alert && analysis?.status === "COMPLETED") {
+        const parsedResult = AnalysisResultSchema.safeParse(analysis.rawOutput);
+        if (parsedResult.success) {
+          const monitoredEntitiesRaw = await this.prisma.monitoredEntity.findMany();
+          const monitoredEntities = monitoredEntitiesRaw.map((entity) => ({
+            id: entity.id,
+            name: entity.name,
+            aliases: entity.aliases,
+          }));
+          const source = await this.prisma.source.findUniqueOrThrow({ where: { id: existing.sourceId } });
+
+          await this.linkMatchedEntities(existing.id, parsedResult.data.entities, monitoredEntities);
+          alert = await this.maybeCreateAlert(
+            analysis.id,
+            publication,
+            source.name,
+            parsedResult.data,
+            monitoredEntities,
+          );
+        }
+      }
+
+      return { publication, analysis, alert, deduplicated: true };
     }
 
     const publication = await this.prisma.publication.create({
@@ -371,11 +403,19 @@ export class AnalysisService {
     name: string,
     monitoredEntities: { id: string; name: string; aliases: string[] }[],
   ) {
-    const normalized = name.trim().toLowerCase();
+    const normalize = (value: string) =>
+      value
+        .normalize("NFKC")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLocaleLowerCase("es");
+    const normalized = normalize(name);
     return monitoredEntities.find(
       (e) =>
-        e.name.trim().toLowerCase() === normalized ||
-        e.aliases.some((alias) => alias.trim().toLowerCase() === normalized),
+        normalize(e.name) === normalized ||
+        e.aliases.some((alias) => normalize(alias) === normalized),
     );
   }
 
