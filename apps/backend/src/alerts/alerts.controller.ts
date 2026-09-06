@@ -5,6 +5,14 @@ import { PrismaService } from "../prisma/prisma.service";
 export class AlertsController {
   constructor(private readonly prisma: PrismaService) {}
 
+  @Get("export")
+  async exportAll() {
+    return this.prisma.alert.findMany({
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      select: { summary: true, publication: { select: { url: true } } },
+    });
+  }
+
   @Get()
   async findAll() {
     return this.prisma.alert.findMany({

@@ -22,6 +22,7 @@ import {
   cancelFacebookCheck,
   deleteAllPublications,
   fetchAlerts,
+  fetchAlertsForExport,
   fetchAutoCheckStatus,
   fetchFacebookSession,
   fetchFacebookCheckStatus,
@@ -56,6 +57,8 @@ const SESSION_LABEL: Record<FacebookSessionStatus | "checking" | "error", string
 export default function MonitoringAlerts() {
   const toast = useToast();
   const [alerts, setAlerts] = useState<AlertListItem[]>([]);
+  const [exporting, setExporting] = useState(false);
+  const exportingRef = useRef(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -81,6 +84,7 @@ export default function MonitoringAlerts() {
 
   const load = () => {
     setLoading(true);
+    setError(null);
     fetchAlerts()
       .then(setAlerts)
       .catch((err: Error) => setError(err.message))
@@ -99,7 +103,7 @@ export default function MonitoringAlerts() {
         console.log("[fetchRecentPublications] respuesta del backend:", data);
         setRecentPublications(data);
       })
-      .catch(() => undefined);
+      .catch((err: Error) => toast.error(`No se pudo actualizar el historial: ${err.message}`));
   };
 
   useEffect(load, []);
@@ -209,6 +213,7 @@ export default function MonitoringAlerts() {
   };
 
   const handleCheckAll = async () => {
+    let reloadAfterCompletion = false;
     cancelRequestedRef.current = false;
     setCheckingAll(true);
     setCheckRunning(true);
@@ -221,6 +226,7 @@ export default function MonitoringAlerts() {
 
     try {
       const results = await checkAllFacebookSources();
+      reloadAfterCompletion = !cancelRequestedRef.current && results.length > 0;
       setCheckingAllResults(results);
       console.log("[checkAllFacebookSources] respuesta del backend:", results);
       const newPublications = results.reduce((sum, r) => sum + (r.newPublications ?? 0), 0);
@@ -247,11 +253,15 @@ export default function MonitoringAlerts() {
       toast.error((err as Error).message);
     } finally {
       window.clearInterval(pollTimer);
-      load();
-      loadRecentPublications();
       setCheckingAll(false);
       setCheckRunning(false);
       cancelRequestedRef.current = false;
+      if (reloadAfterCompletion) {
+        window.location.reload();
+      } else {
+        load();
+        loadRecentPublications();
+      }
     }
   };
 
@@ -287,116 +297,71 @@ export default function MonitoringAlerts() {
     }
   };
 
-const handleExportRecentPublications = async () => {
-  if (recentPublications.length === 0) {
-    toast.error("Todavía no hay registros para exportar.");
-    return;
-  }
-
-  const workbook = new ExcelJS.Workbook();
-  const worksheet = workbook.addWorksheet("Publicaciones");
-
-  // Definición de columnas
-  worksheet.columns = [
-    { header: "Fuente", key: "fuente", width: 25 },
-    { header: "Contenido", key: "contenido", width: 80 },
-    { header: "Link", key: "link", width: 48 },
-    { header: "Resultado IA", key: "resultado", width: 70 },
-  ];
-
-  // Estilo del encabezado
-  const headerRow = worksheet.getRow(1);
-  headerRow.height = 22;
-  headerRow.eachCell((cell) => {
-    cell.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
-    cell.fill = {
-      type: "pattern",
-      pattern: "solid",
-      fgColor: { argb: "FF2F5597" },
-    };
-    cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
-    cell.border = {
-      top: { style: "thin", color: { argb: "FF333333" } },
-      bottom: { style: "thin", color: { argb: "FF333333" } },
-      left: { style: "thin", color: { argb: "FF333333" } },
-      right: { style: "thin", color: { argb: "FF333333" } },
-    };
-  });
-
-  // Filas de datos
-  recentPublications.forEach((pub, index) => {
-    const iaResult =
-      pub.analysis?.status === "FAILED"
-        ? `Falló: ${pub.analysis.error ?? "Error desconocido"}`
-        : pub.analysis?.relevant
-          ? `Relevante · ${pub.analysis.category ?? "Sin categoría"} · ${pub.analysis.severity ?? "Sin severidad"}`
-          : "No relevante";
-
-    const iaSummary = pub.analysis?.summary ? ` | ${pub.analysis.summary}` : "";
-
-    const row = worksheet.addRow({
-      fuente: pub.source.name,
-      contenido: pub.content,
-      link: pub.url,
-      resultado: `${iaResult}${iaSummary}`,
-    });
-
-    const isEven = index % 2 === 0;
-
-    row.eachCell((cell) => {
-      cell.alignment = { vertical: "top", horizontal: "left", wrapText: true };
-      cell.font = { color: { argb: "FF1F1F1F" }, size: 10 };
-      cell.fill = {
-        type: "pattern",
-        pattern: "solid",
-        fgColor: { argb: isEven ? "FFF2F2F2" : "FFFFFFFF" }, // filas alternadas
-      };
-      cell.border = {
-        top: { style: "thin", color: { argb: "FFD9D9D9" } },
-        bottom: { style: "thin", color: { argb: "FFD9D9D9" } },
-        left: { style: "thin", color: { argb: "FFD9D9D9" } },
-        right: { style: "thin", color: { argb: "FFD9D9D9" } },
-      };
-    });
-
-    // Link como hipervínculo real
-    const linkCell = row.getCell("link");
-    if (pub.url) {
-      linkCell.value = { text: pub.url, hyperlink: pub.url };
-      linkCell.font = { color: { argb: "FF2F5597" }, underline: true, size: 10 };
+  const handleExportAlerts = async () => {
+    if (exportingRef.current) return;
+    exportingRef.current = true;
+    setExporting(true);
+    try {
+      const rows = await fetchAlertsForExport();
+      if (rows.length === 0) {
+        toast.error("Todavía no hay alertas para exportar.");
+        return;
+      }
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet("Alertas");
+      worksheet.columns = [
+        { header: "Resumen", key: "summary", width: 100 },
+        { header: "Enlace", key: "link", width: 55 },
+      ];
+      rows.forEach((alert, index) => {
+        const row = worksheet.addRow({
+          summary: alert.summary,
+          link: { text: alert.publication.url, hyperlink: alert.publication.url },
+        });
+        row.eachCell((cell) => {
+          cell.alignment = { vertical: "top", wrapText: true };
+          cell.font = { size: 11 };
+          cell.fill = {
+            type: "pattern", pattern: "solid",
+            fgColor: { argb: index % 2 === 0 ? "FFF2F2F2" : "FFFFFFFF" },
+          };
+        });
+        row.getCell("link").font = { color: { argb: "FF2F5597" }, underline: true };
+      });
+      const header = worksheet.getRow(1);
+      header.height = 24;
+      header.eachCell((cell) => {
+        cell.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2F5597" } };
+        cell.alignment = { vertical: "middle", horizontal: "center" };
+      });
+      worksheet.views = [{ state: "frozen", ySplit: 1 }];
+      worksheet.autoFilter = { from: "A1", to: `B${worksheet.rowCount}` };
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      const now = new Date();
+      const date = [now.getFullYear(), String(now.getMonth() + 1).padStart(2, "0"), String(now.getDate()).padStart(2, "0")].join("-");
+      try {
+        anchor.href = url;
+        anchor.download = `alertas-${date}.xlsx`;
+        document.body.appendChild(anchor);
+        anchor.click();
+      } finally {
+        anchor.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+      toast.success(`Descarga iniciada: ${rows.length} alerta(s) en Excel.`);
+    } catch (err) {
+      toast.error(`No se pudo exportar las alertas: ${err instanceof Error ? err.message : "Error desconocido"}`);
+    } finally {
+      exportingRef.current = false;
+      setExporting(false);
     }
-
-    // Resaltar filas "Relevante"
-    const resultadoCell = row.getCell("resultado");
-    if (pub.analysis?.relevant) {
-      resultadoCell.font = { ...resultadoCell.font, color: { argb: "FF1B7A32" }, bold: true };
-    } else if (pub.analysis?.status === "FAILED") {
-      resultadoCell.font = { ...resultadoCell.font, color: { argb: "FFC00000" }, bold: true };
-    }
-  });
-
-  // Congelar la fila de encabezado
-  worksheet.views = [{ state: "frozen", ySplit: 1 }];
-
-  // Autofiltro
-  worksheet.autoFilter = {
-    from: { row: 1, column: 1 },
-    to: { row: 1, column: 4 },
   };
-
-  const buffer = await workbook.xlsx.writeBuffer();
-  const blob = new Blob([buffer], {
-    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `publicaciones-revisadas-${new Date().toISOString().slice(0, 10)}.xlsx`;
-  a.click();
-  URL.revokeObjectURL(url);
-
-  toast.success(`Se descargó ${recentPublications.length} registro(s) en Excel.`);
-};
   return (
     <>
       <PageMeta title="Alertas | El mapero" description="Alertas generadas por el monitor de publicaciones" />
@@ -518,6 +483,11 @@ const handleExportRecentPublications = async () => {
         </ComponentCard>
 
         <ComponentCard title="Alertas detectadas">
+          <div className="flex justify-end">
+            <Button size="sm" variant="outline" onClick={handleExportAlerts} disabled={exporting}>
+              {exporting ? "Exportando..." : "Descargar Excel"}
+            </Button>
+          </div>
           {loading && <p className="text-gray-500 dark:text-gray-400">Cargando...</p>}
           {error && (
             <p className="text-error-500">
@@ -598,14 +568,6 @@ const handleExportRecentPublications = async () => {
             <Button
               size="sm"
               variant="outline"
-              onClick={handleExportRecentPublications}
-              disabled={recentPublications.length === 0}
-            >
-              Descargar Excel
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
               className="!text-error-500 !border-error-500 hover:!bg-error-50"
               onClick={() => setConfirmDeleteAll(true)}
               disabled={recentPublications.length === 0}
@@ -668,7 +630,13 @@ const handleExportRecentPublications = async () => {
                         <TableCell className="px-4 py-3 text-start text-theme-sm">
                           {pub.analysis?.status === "FAILED" ? (
                             <Badge size="sm" color="error">Falló: {pub.analysis.error}</Badge>
-                          ) : pub.analysis?.relevant ? (
+                          ) : !pub.analysis ? (
+                            <Badge size="sm" color="info">Sin análisis</Badge>
+                          ) : pub.analysis.status === "PENDING" ? (
+                            <Badge size="sm" color="info">Pendiente</Badge>
+                          ) : pub.analysis.relevant === null ? (
+                            <Badge size="sm" color="info">Sin resultado</Badge>
+                          ) : pub.analysis.relevant ? (
                             <Badge size="sm" color="error">
                               Relevante · {pub.analysis.category} · {pub.analysis.severity}
                             </Badge>
