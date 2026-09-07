@@ -254,15 +254,42 @@ async function collectVisibleTimelinePermalinks(
   const seen = new Set<string>();
   const verticalPositions = new Map<string, number>();
   const main = page.locator('[role="main"]').first();
+  let timelineStartTop: number | null = null;
 
   await main.waitFor({ state: "visible", timeout: 15_000 });
 
   for (let attempt = 0; attempt <= MAX_SCROLL_ATTEMPTS; attempt++) {
     if (shouldCancel()) return { links, reachedKnownPost: false, cancelled: true };
 
-    const candidates = await main.locator('a[href]').evaluateAll((anchors, currentPageSegment) => {
+    const snapshot = await main.locator('a[href]').evaluateAll((anchors, currentPageSegment) => {
       const viewportWidth = window.innerWidth;
       const mainElement = anchors[0]?.closest('[role="main"]');
+      const cleanText = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim();
+      const timelineHeadingTop = mainElement
+        ? [...mainElement.querySelectorAll<HTMLElement>('h1,h2,h3,h4,span,div')]
+            .filter((element) => /^(Publicaciones|Posts)$/i.test(cleanText(element.textContent)))
+            .map((element) => {
+              const rect = element.getBoundingClientRect();
+              return rect.width > 0 && rect.height > 0 ? rect.top + window.scrollY : Number.NaN;
+            })
+            .filter(Number.isFinite)
+            .sort((left, right) => left - right)[0] ?? null
+        : null;
+      const isPinned = (element: Element) => {
+        let card: Element | null = element;
+        while (card && card !== mainElement) {
+          const isPostCard = !!card.querySelector(
+            '[data-ad-preview="message"], [data-ad-comet-preview="message"], [data-video-id]',
+          );
+          if (isPostCard) {
+            return [...card.querySelectorAll<HTMLElement>('span,div')].some((label) =>
+              /^(Publicaci[oó]n fijada|Fijad[ao]|Pinned post|Pinned)$/i.test(cleanText(label.textContent)),
+            );
+          }
+          card = card.parentElement;
+        }
+        return false;
+      };
       const effectiveRect = (element: Element) => {
         const ownRect = element.getBoundingClientRect();
         if (ownRect.width > 0 && ownRect.height > 0) return ownRect;
@@ -288,6 +315,7 @@ async function collectVisibleTimelinePermalinks(
             left: rect.left,
             centerX: rect.left + rect.width / 2,
             visible: rect.width > 0 && rect.height > 0,
+            pinned: isPinned(anchor),
             viewportWidth,
           };
         });
@@ -303,6 +331,7 @@ async function collectVisibleTimelinePermalinks(
               left: rect.left,
               centerX: rect.left + rect.width / 2,
               visible: !!videoId && rect.width > 0 && rect.height > 0,
+              pinned: isPinned(element),
               viewportWidth,
             };
           })
@@ -334,6 +363,7 @@ async function collectVisibleTimelinePermalinks(
             left: rect.left,
             centerX: rect.left + rect.width / 2,
             visible: rect.width > 0 && rect.height > 0,
+            pinned: isPinned(card),
             viewportWidth,
           }];
         } catch {
@@ -341,10 +371,16 @@ async function collectVisibleTimelinePermalinks(
         }
       });
 
-      return [...linkCandidates, ...videoCandidates, ...albumPostCandidates]
-        .filter((item) => item.visible)
-        .sort((left, right) => left.top - right.top || left.left - right.left);
+      return {
+        timelineHeadingTop,
+        candidates: [...linkCandidates, ...videoCandidates, ...albumPostCandidates]
+          .filter((item) => item.visible)
+          .sort((left, right) => left.top - right.top || left.left - right.left),
+      };
     }, pageSegment);
+
+    if (snapshot.timelineHeadingTop !== null) timelineStartTop = snapshot.timelineHeadingTop;
+    const candidates = snapshot.candidates;
 
     let added = 0;
     for (const candidate of candidates) {
@@ -352,6 +388,8 @@ async function collectVisibleTimelinePermalinks(
       if (!belongsToPage(candidate.href, pageSegment)) continue;
       if (candidate.viewportWidth >= 900 && candidate.centerX < candidate.viewportWidth * 0.35) continue;
       if (/foto de portada del perfil|profile cover photo/i.test(candidate.ariaLabel)) continue;
+      if (timelineStartTop !== null && candidate.top <= timelineStartTop) continue;
+      if (candidate.pinned) continue;
 
       const identity = postIdentity(candidate.href);
       if (seen.has(identity)) continue;
@@ -962,7 +1000,7 @@ async function extractPostAtPermalink(
   return {
     ...post,
     url: normalizeVideoPermalink(permalink, requestedUrl),
-    kind: contentKindFromPermalink(permalink),
+    kind: post.kind === "LIVE" ? "LIVE" : contentKindFromPermalink(permalink),
   };
 }
 

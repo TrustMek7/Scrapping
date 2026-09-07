@@ -25,6 +25,7 @@ import {
   fetchAlertsForExport,
   fetchAutoCheckStatus,
   fetchFacebookSession,
+  getCachedFacebookSession,
   fetchFacebookCheckStatus,
   fetchRecentPublications,
   fetchSources,
@@ -58,6 +59,7 @@ export default function MonitoringAlerts() {
   const toast = useToast();
   const [alerts, setAlerts] = useState<AlertListItem[]>([]);
   const [exporting, setExporting] = useState(false);
+  const [exportingHistory, setExportingHistory] = useState(false);
   const exportingRef = useRef(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -69,7 +71,7 @@ export default function MonitoringAlerts() {
   const [facebookSources, setFacebookSources] = useState<SourceItem[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState("");
   const [sessionStatus, setSessionStatus] = useState<FacebookSessionStatus | "checking" | "error">(
-    "checking",
+    () => getCachedFacebookSession() ?? "checking",
   );
   const [loginPending, setLoginPending] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -362,6 +364,80 @@ export default function MonitoringAlerts() {
       setExporting(false);
     }
   };
+
+  const handleExportHistory = async () => {
+    if (recentPublications.length === 0 || exportingHistory) return;
+    setExportingHistory(true);
+    try {
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet("Historial");
+      worksheet.columns = [
+        { header: "Fuente", key: "source", width: 28 },
+        { header: "Contenido", key: "content", width: 90 },
+        { header: "Enlace", key: "link", width: 55 },
+        { header: "Resultado IA", key: "result", width: 70 },
+        { header: "Fecha de registro", key: "createdAt", width: 24 },
+      ];
+      recentPublications.forEach((publication, index) => {
+        const analysis = publication.analysis;
+        const result = !analysis
+          ? "Sin análisis"
+          : analysis.status === "FAILED"
+            ? `Falló: ${analysis.error ?? "Error desconocido"}`
+            : analysis.status === "PENDING"
+              ? "Pendiente"
+              : analysis.relevant
+                ? `Relevante · ${analysis.category ?? "Sin categoría"} · ${analysis.severity ?? "Sin severidad"}${analysis.summary ? ` | ${analysis.summary}` : ""}`
+                : "No relevante";
+        const row = worksheet.addRow({
+          source: publication.source.name,
+          content: publication.content,
+          link: { text: publication.url, hyperlink: publication.url },
+          result,
+          createdAt: new Date(publication.createdAt).toLocaleString(),
+        });
+        row.eachCell((cell) => {
+          cell.alignment = { vertical: "top", wrapText: true };
+          cell.font = { size: 10 };
+          cell.fill = {
+            type: "pattern",
+            pattern: "solid",
+            fgColor: { argb: index % 2 === 0 ? "FFF2F2F2" : "FFFFFFFF" },
+          };
+        });
+        row.getCell("link").font = { color: { argb: "FF2F5597" }, underline: true, size: 10 };
+      });
+      const header = worksheet.getRow(1);
+      header.height = 24;
+      header.eachCell((cell) => {
+        cell.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2F5597" } };
+        cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+      });
+      worksheet.views = [{ state: "frozen", ySplit: 1 }];
+      worksheet.autoFilter = { from: "A1", to: `E${worksheet.rowCount}` };
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      try {
+        anchor.href = url;
+        anchor.download = `historial-publicaciones-${new Date().toISOString().slice(0, 10)}.xlsx`;
+        document.body.appendChild(anchor);
+        anchor.click();
+      } finally {
+        anchor.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+      toast.success(`Descarga iniciada: ${recentPublications.length} registro(s) del historial.`);
+    } catch (err) {
+      toast.error(`No se pudo exportar el historial: ${err instanceof Error ? err.message : "Error desconocido"}`);
+    } finally {
+      setExportingHistory(false);
+    }
+  };
   return (
     <>
       <PageMeta title="Alertas | El mapero" description="Alertas generadas por el monitor de publicaciones" />
@@ -565,6 +641,14 @@ export default function MonitoringAlerts() {
 
         <ComponentCard title="Historial de publicaciones revisadas">
           <div className="flex justify-end gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleExportHistory}
+              disabled={recentPublications.length === 0 || exportingHistory}
+            >
+              {exportingHistory ? "Exportando..." : "Descargar historial"}
+            </Button>
             <Button
               size="sm"
               variant="outline"

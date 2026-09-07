@@ -251,13 +251,15 @@ async function extractMessageText(post: Locator, page: Page) {
     // dentro de un <span dir="auto">, sin ningún atributo que lo identifique
     // puntualmente. Último recurso: el primer bloque de texto largo dentro
     // de spans "dir=auto" del contenedor.
-    const autoDirBlocks = post.locator('span[dir="auto"] > div');
-    const autoDirCount = await autoDirBlocks.count().catch(() => 0);
+    if (contentKind(page.url()) === "REEL") {
+      const autoDirBlocks = post.locator('span[dir="auto"] > div');
+      const autoDirCount = await autoDirBlocks.count().catch(() => 0);
 
-    for (let i = 0; i < autoDirCount; i++) {
-      const cleaned = cleanText(await autoDirBlocks.nth(i).textContent().catch(() => null));
-      if (cleaned && cleaned.length > 15 && !VIDEO_UI_LABELS.has(cleaned.toLowerCase())) {
-        return cleaned;
+      for (let i = 0; i < autoDirCount; i++) {
+        const cleaned = cleanText(await autoDirBlocks.nth(i).textContent().catch(() => null));
+        if (cleaned && cleaned.length > 15 && !VIDEO_UI_LABELS.has(cleaned.toLowerCase())) {
+          return cleaned;
+        }
       }
     }
 

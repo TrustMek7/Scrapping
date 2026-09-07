@@ -115,14 +115,14 @@ export const deleteEntity = (id: string) =>
 export type FacebookSessionStatus = "active" | "required" | "expired";
 
 const FACEBOOK_SESSION_CACHE_KEY = "facebook-session-status";
-const FACEBOOK_SESSION_CACHE_TTL_MS = 5 * 60 * 1000;
+const FACEBOOK_SESSION_CACHE_TTL_MS = 30 * 60 * 1000;
 
 interface FacebookSessionCache {
   status: FacebookSessionStatus;
   checkedAt: number;
 }
 
-function readFacebookSessionCache(): FacebookSessionStatus | null {
+export function getCachedFacebookSession(): FacebookSessionStatus | null {
   if (typeof window === "undefined") return null;
   try {
     const raw = window.localStorage.getItem(FACEBOOK_SESSION_CACHE_KEY);
@@ -148,7 +148,7 @@ function writeFacebookSessionCache(status: FacebookSessionStatus) {
 }
 
 export const fetchFacebookSession = async (force = false) => {
-  const cached = force ? null : readFacebookSessionCache();
+  const cached = force ? null : getCachedFacebookSession();
   if (cached) return { status: cached };
   const result = await request<{ status: FacebookSessionStatus }>("/facebook/session");
   writeFacebookSessionCache(result.status);
@@ -251,7 +251,7 @@ export interface RecentPublicationItem {
 }
 
 export const fetchRecentPublications = () =>
-  request<RecentPublicationItem[]>("/analysis?limit=20");
+  request<RecentPublicationItem[]>("/analysis");
 
 export const deleteAllPublications = () =>
   request<{ deleted: number }>("/analysis", { method: "DELETE" });

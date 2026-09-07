@@ -300,9 +300,8 @@ export class AnalysisService {
   }
 
   /** Lista las últimas publicaciones analizadas, tengan o no alerta — registro/historial de revisiones. */
-  async listRecent(limit = 20) {
+  async listRecent() {
     const publications = await this.prisma.publication.findMany({
-      take: limit,
       orderBy: { createdAt: "desc" },
       include: { source: { select: { name: true } }, analysis: true },
     });

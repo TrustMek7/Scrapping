@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, Post, Query } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Delete, Get, Post } from "@nestjs/common";
 import { z } from "zod";
 import { SourceTypeSchema } from "@scrapping/shared";
 import { AnalysisService } from "./analysis.service";
@@ -35,11 +35,8 @@ export class AnalysisController {
 
   /** Historial de publicaciones revisadas, tengan o no alerta. */
   @Get()
-  async listRecent(@Query("limit") limit?: string) {
-    const parsedLimit = Number(limit);
-    return this.analysisService.listRecent(
-      Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : undefined,
-    );
+  async listRecent() {
+    return this.analysisService.listRecent();
   }
 
   /** Borra todo el historial de publicaciones revisadas (y sus análisis/alertas). */

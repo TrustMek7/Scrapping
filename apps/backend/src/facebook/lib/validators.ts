@@ -1,6 +1,6 @@
 import { FacebookError } from "./errors";
 
-const FACEBOOK_HOSTS = new Set(["facebook.com", "www.facebook.com"]);
+const FACEBOOK_HOSTS = new Set(["facebook.com", "www.facebook.com", "web.facebook.com"]);
 const POST_PATHS = [
   /^\/share\/[a-zA-Z0-9]+\/?$/,
   /^\/share\/p\/[a-zA-Z0-9]+\/?$/,
@@ -76,6 +76,8 @@ export function normalizeFacebookPostUrl(input: unknown) {
   url.hostname = "www.facebook.com";
   url.hash = "";
   url.searchParams.delete("mibextid");
+  url.searchParams.delete("_rdc");
+  url.searchParams.delete("_rdr");
   return url.href;
 }
 
@@ -115,5 +117,7 @@ export function normalizeFacebookPageUrl(input: unknown) {
   url.hostname = "www.facebook.com";
   url.hash = "";
   url.searchParams.delete("mibextid");
+  url.searchParams.delete("_rdc");
+  url.searchParams.delete("_rdr");
   return url.href;
 }
