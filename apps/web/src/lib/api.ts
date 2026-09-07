@@ -45,7 +45,7 @@ export interface AlertListItem {
 export const fetchAlerts = () => request<AlertListItem[]>("/alerts");
 
 export const fetchAlertsForExport = () =>
-  request<{ summary: string; publication: { url: string } }[]>("/alerts/export");
+  request<{ summary: string; publication: { url: string; source: { name: string } } }[]>("/alerts/export");
 
 export interface SourceItem {
   id: string;

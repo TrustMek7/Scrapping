@@ -9,7 +9,10 @@ export class AlertsController {
   async exportAll() {
     return this.prisma.alert.findMany({
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      select: { summary: true, publication: { select: { url: true } } },
+      select: {
+        summary: true,
+        publication: { select: { url: true, source: { select: { name: true } } } },
+      },
     });
   }
 
@@ -17,7 +20,6 @@ export class AlertsController {
   async findAll() {
     return this.prisma.alert.findMany({
       orderBy: { createdAt: "desc" },
-      take: 200,
       include: {
         publication: {
           select: { id: true, title: true, url: true, publishedAt: true, source: { select: { name: true } } },

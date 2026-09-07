@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ExcelJS from "exceljs";
 import PageBreadcrumb from "../../components/common/PageBreadCrumb";
 import ComponentCard from "../../components/common/ComponentCard";
@@ -65,6 +65,8 @@ export default function MonitoringAlerts() {
   const [error, setError] = useState<string | null>(null);
 
   const [recentPublications, setRecentPublications] = useState<RecentPublicationItem[]>([]);
+  const [alertSourceFilter, setAlertSourceFilter] = useState("ALL");
+  const [historySourceFilter, setHistorySourceFilter] = useState("ALL");
   const [imagesModalPub, setImagesModalPub] = useState<RecentPublicationItem | null>(null);
   const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
 
@@ -133,6 +135,25 @@ export default function MonitoringAlerts() {
     }, 1000);
     return () => window.clearInterval(timer);
   }, [checkRunning]);
+
+  const alertSourceOptions = useMemo(
+    () => [...new Set(alerts.map((alert) => alert.publication.source.name))].sort((a, b) => a.localeCompare(b)),
+    [alerts],
+  );
+  const historySourceOptions = useMemo(
+    () => [...new Set(recentPublications.map((publication) => publication.source.name))].sort((a, b) => a.localeCompare(b)),
+    [recentPublications],
+  );
+  const filteredAlerts = useMemo(
+    () => alerts.filter((alert) => alertSourceFilter === "ALL" || alert.publication.source.name === alertSourceFilter),
+    [alerts, alertSourceFilter],
+  );
+  const filteredRecentPublications = useMemo(
+    () => recentPublications.filter(
+      (publication) => historySourceFilter === "ALL" || publication.source.name === historySourceFilter,
+    ),
+    [recentPublications, historySourceFilter],
+  );
 
   const handleToggleAutoCheck = async () => {
     setAutoCheckPending(true);
@@ -305,18 +326,23 @@ export default function MonitoringAlerts() {
     setExporting(true);
     try {
       const rows = await fetchAlertsForExport();
-      if (rows.length === 0) {
+      const filteredRows = rows.filter(
+        (alert) => alertSourceFilter === "ALL" || alert.publication.source.name === alertSourceFilter,
+      );
+      if (filteredRows.length === 0) {
         toast.error("Todavía no hay alertas para exportar.");
         return;
       }
       const workbook = new ExcelJS.Workbook();
       const worksheet = workbook.addWorksheet("Alertas");
       worksheet.columns = [
+        { header: "Fuente", key: "source", width: 30 },
         { header: "Resumen", key: "summary", width: 100 },
         { header: "Enlace", key: "link", width: 55 },
       ];
-      rows.forEach((alert, index) => {
+      filteredRows.forEach((alert, index) => {
         const row = worksheet.addRow({
+          source: alert.publication.source.name,
           summary: alert.summary,
           link: { text: alert.publication.url, hyperlink: alert.publication.url },
         });
@@ -338,7 +364,7 @@ export default function MonitoringAlerts() {
         cell.alignment = { vertical: "middle", horizontal: "center" };
       });
       worksheet.views = [{ state: "frozen", ySplit: 1 }];
-      worksheet.autoFilter = { from: "A1", to: `B${worksheet.rowCount}` };
+      worksheet.autoFilter = { from: "A1", to: `C${worksheet.rowCount}` };
       const buffer = await workbook.xlsx.writeBuffer();
       const blob = new Blob([buffer], {
         type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -356,7 +382,7 @@ export default function MonitoringAlerts() {
         anchor.remove();
         window.setTimeout(() => URL.revokeObjectURL(url), 1000);
       }
-      toast.success(`Descarga iniciada: ${rows.length} alerta(s) en Excel.`);
+      toast.success(`Descarga iniciada: ${filteredRows.length} alerta(s) en Excel.`);
     } catch (err) {
       toast.error(`No se pudo exportar las alertas: ${err instanceof Error ? err.message : "Error desconocido"}`);
     } finally {
@@ -366,7 +392,7 @@ export default function MonitoringAlerts() {
   };
 
   const handleExportHistory = async () => {
-    if (recentPublications.length === 0 || exportingHistory) return;
+    if (filteredRecentPublications.length === 0 || exportingHistory) return;
     setExportingHistory(true);
     try {
       const workbook = new ExcelJS.Workbook();
@@ -378,7 +404,7 @@ export default function MonitoringAlerts() {
         { header: "Resultado IA", key: "result", width: 70 },
         { header: "Fecha de registro", key: "createdAt", width: 24 },
       ];
-      recentPublications.forEach((publication, index) => {
+      filteredRecentPublications.forEach((publication, index) => {
         const analysis = publication.analysis;
         const result = !analysis
           ? "Sin análisis"
@@ -431,7 +457,7 @@ export default function MonitoringAlerts() {
         anchor.remove();
         window.setTimeout(() => URL.revokeObjectURL(url), 1000);
       }
-      toast.success(`Descarga iniciada: ${recentPublications.length} registro(s) del historial.`);
+      toast.success(`Descarga iniciada: ${filteredRecentPublications.length} registro(s) del historial.`);
     } catch (err) {
       toast.error(`No se pudo exportar el historial: ${err instanceof Error ? err.message : "Error desconocido"}`);
     } finally {
@@ -559,8 +585,23 @@ export default function MonitoringAlerts() {
         </ComponentCard>
 
         <ComponentCard title="Alertas detectadas">
-          <div className="flex justify-end">
-            <Button size="sm" variant="outline" onClick={handleExportAlerts} disabled={exporting}>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-56">
+              <Select
+                options={[
+                  { value: "ALL", label: "Todas las fuentes" },
+                  ...alertSourceOptions.map((source) => ({ value: source, label: source })),
+                ]}
+                defaultValue="ALL"
+                onChange={setAlertSourceFilter}
+              />
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleExportAlerts}
+              disabled={filteredAlerts.length === 0 || exporting}
+            >
               {exporting ? "Exportando..." : "Descargar Excel"}
             </Button>
           </div>
@@ -577,7 +618,12 @@ export default function MonitoringAlerts() {
               <code>ALERT_MIN_CONFIDENCE</code>.
             </p>
           )}
-          {!loading && !error && alerts.length > 0 && (
+          {!loading && !error && alerts.length > 0 && filteredAlerts.length === 0 && (
+            <p className="mt-4 text-gray-500 dark:text-gray-400">
+              No hay alertas para la fuente seleccionada.
+            </p>
+          )}
+          {!loading && !error && filteredAlerts.length > 0 && (
             <div className="overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-white/[0.05] dark:bg-white/[0.03]">
               <div className="max-w-full overflow-x-auto">
                 <Table>
@@ -604,7 +650,7 @@ export default function MonitoringAlerts() {
                     </TableRow>
                   </TableHeader>
                   <TableBody className="divide-y divide-gray-100 dark:divide-white/[0.05]">
-                    {alerts.map((alert) => (
+                    {filteredAlerts.map((alert) => (
                       <TableRow key={alert.id}>
                         <TableCell className="px-5 py-4 text-start font-medium text-gray-800 text-theme-sm dark:text-white/90">
                           {alert.entity.name}
@@ -640,29 +686,45 @@ export default function MonitoringAlerts() {
         </ComponentCard>
 
         <ComponentCard title="Historial de publicaciones revisadas">
-          <div className="flex justify-end gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={handleExportHistory}
-              disabled={recentPublications.length === 0 || exportingHistory}
-            >
-              {exportingHistory ? "Exportando..." : "Descargar historial"}
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="!text-error-500 !border-error-500 hover:!bg-error-50"
-              onClick={() => setConfirmDeleteAll(true)}
-              disabled={recentPublications.length === 0}
-            >
-              Borrar todos los registros
-            </Button>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-56">
+              <Select
+                options={[
+                  { value: "ALL", label: "Todas las fuentes" },
+                  ...historySourceOptions.map((source) => ({ value: source, label: source })),
+                ]}
+                defaultValue="ALL"
+                onChange={setHistorySourceFilter}
+              />
+            </div>
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleExportHistory}
+                disabled={filteredRecentPublications.length === 0 || exportingHistory}
+              >
+                {exportingHistory ? "Exportando..." : "Descargar historial"}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="!text-error-500 !border-error-500 hover:!bg-error-50"
+                onClick={() => setConfirmDeleteAll(true)}
+                disabled={recentPublications.length === 0}
+              >
+                Borrar todos los registros
+              </Button>
+            </div>
           </div>
 
           {recentPublications.length === 0 ? (
             <p className="mt-4 text-gray-500 dark:text-gray-400">
               Todavía no se revisó ninguna publicación.
+            </p>
+          ) : filteredRecentPublications.length === 0 ? (
+            <p className="mt-4 text-gray-500 dark:text-gray-400">
+              No hay publicaciones para la fuente seleccionada.
             </p>
           ) : (
             <div className="mt-4 overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-white/[0.05] dark:bg-white/[0.03]">
@@ -688,7 +750,7 @@ export default function MonitoringAlerts() {
                     </TableRow>
                   </TableHeader>
                   <TableBody className="divide-y divide-gray-100 dark:divide-white/[0.05]">
-                    {recentPublications.map((pub) => (
+                    {filteredRecentPublications.map((pub) => (
                       <TableRow key={pub.id}>
                         <TableCell className="px-5 py-4 text-start font-medium text-gray-800 text-theme-sm dark:text-white/90">
                           {pub.source.name}
