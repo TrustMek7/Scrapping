@@ -43,6 +43,12 @@ export class EntitiesController {
     return this.prisma.monitoredEntity.update({ where: { id }, data: parsed.data });
   }
 
+  @Delete()
+  async removeAll() {
+    const result = await this.prisma.monitoredEntity.deleteMany();
+    return { deleted: result.count };
+  }
+
   @Delete(":id")
   async remove(@Param("id") id: string) {
     await this.ensureExists(id);

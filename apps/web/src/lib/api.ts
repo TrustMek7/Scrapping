@@ -67,6 +67,8 @@ export const updateSource = (id: string, data: UpdateSourceInput) =>
   request<SourceItem>(`/sources/${id}`, { method: "PATCH", body: JSON.stringify(data) });
 export const deleteSource = (id: string) =>
   request<{ deleted: boolean }>(`/sources/${id}`, { method: "DELETE" });
+export const deleteAllSources = () =>
+  request<{ deleted: number }>("/sources", { method: "DELETE" });
 
 export interface BulkFacebookSourceImportResult {
   created: number;
@@ -111,6 +113,8 @@ export const updateEntity = (id: string, data: UpdateMonitoredEntityInput) =>
   request<MonitoredEntityItem>(`/entities/${id}`, { method: "PATCH", body: JSON.stringify(data) });
 export const deleteEntity = (id: string) =>
   request<{ deleted: boolean }>(`/entities/${id}`, { method: "DELETE" });
+export const deleteAllEntities = () =>
+  request<{ deleted: number }>("/entities", { method: "DELETE" });
 
 export type FacebookSessionStatus = "active" | "required" | "expired";
 

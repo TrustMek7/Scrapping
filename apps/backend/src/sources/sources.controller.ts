@@ -164,6 +164,12 @@ export class SourcesController {
     return this.prisma.source.update({ where: { id }, data: parsed.data });
   }
 
+  @Delete()
+  async removeAll() {
+    const result = await this.prisma.source.deleteMany();
+    return { deleted: result.count };
+  }
+
   @Delete(":id")
   async remove(@Param("id") id: string) {
     await this.ensureExists(id);

@@ -18,6 +18,7 @@ import Label from "../../components/form/Label";
 import Input from "../../components/form/input/InputField";
 import {
   createEntity,
+  deleteAllEntities,
   deleteEntity,
   fetchEntities,
   updateEntity,
@@ -48,6 +49,8 @@ export default function Entities() {
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<MonitoredEntityItem | null>(null);
+  const [deleteAllOpen, setDeleteAllOpen] = useState(false);
+  const [deletingAll, setDeletingAll] = useState(false);
   const toast = useToast();
 
   const load = () => {
@@ -119,13 +122,37 @@ export default function Entities() {
     }
   };
 
+  const confirmDeleteAll = async () => {
+    setDeletingAll(true);
+    try {
+      const result = await deleteAllEntities();
+      setDeleteAllOpen(false);
+      toast.success(`Se eliminaron ${result.deleted} parámetros.`);
+      load();
+    } catch (err) {
+      setDeleteAllOpen(false);
+      toast.error((err as Error).message);
+    } finally {
+      setDeletingAll(false);
+    }
+  };
+
   return (
     <>
       <PageMeta title="Parámetros de búsqueda | El mapero" description="Parámetros de búsqueda monitoreados por el sistema" />
       <PageBreadcrumb pageTitle="Parámetros de búsqueda" />
       <div className="space-y-6">
         <ComponentCard title="Parámetros de búsqueda">
-          <div className="flex justify-end">
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              className="!text-error-500 !ring-error-300 hover:!bg-error-50 dark:!ring-error-500/40 dark:hover:!bg-error-500/10"
+              onClick={() => setDeleteAllOpen(true)}
+              disabled={entities.length === 0}
+            >
+              Eliminar todos
+            </Button>
             <Button size="sm" onClick={openCreate}>
               Nuevo parámetro
             </Button>
@@ -231,6 +258,14 @@ export default function Entities() {
         message={`¿Eliminar el parámetro "${deleteTarget?.name}"? Esto también borra sus alertas asociadas si las hubiera.`}
         onConfirm={confirmDelete}
         onCancel={cancelDelete}
+      />
+      <ConfirmDialog
+        isOpen={deleteAllOpen}
+        title="Eliminar todos los parámetros"
+        message={`¿Eliminar los ${entities.length} parámetros de búsqueda? También se borrarán sus coincidencias y alertas asociadas. Esta acción no se puede deshacer.`}
+        confirmLabel={deletingAll ? "Eliminando..." : "Eliminar todos"}
+        onConfirm={confirmDeleteAll}
+        onCancel={() => !deletingAll && setDeleteAllOpen(false)}
       />
     </>
   );

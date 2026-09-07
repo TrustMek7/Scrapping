@@ -19,6 +19,7 @@ import Input from "../../components/form/input/InputField";
 import Select from "../../components/form/Select";
 import {
   createSource,
+  deleteAllSources,
   deleteSource,
   fetchSources,
   importFacebookSourcesFromExcel,
@@ -61,6 +62,8 @@ export default function Sources() {
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<SourceItem | null>(null);
+  const [deleteAllOpen, setDeleteAllOpen] = useState(false);
+  const [deletingAll, setDeletingAll] = useState(false);
   const [importing, setImporting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const toast = useToast();
@@ -133,6 +136,21 @@ export default function Sources() {
     }
   };
 
+  const confirmDeleteAll = async () => {
+    setDeletingAll(true);
+    try {
+      const result = await deleteAllSources();
+      setDeleteAllOpen(false);
+      toast.success(`Se eliminaron ${result.deleted} fuentes.`);
+      load();
+    } catch (err) {
+      setDeleteAllOpen(false);
+      toast.error((err as Error).message);
+    } finally {
+      setDeletingAll(false);
+    }
+  };
+
   const handleImportExcel = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -162,6 +180,15 @@ export default function Sources() {
       <div className="space-y-6">
         <ComponentCard title="Fuentes registradas">
           <div className="flex flex-wrap justify-end gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              className="!text-error-500 !ring-error-300 hover:!bg-error-50 dark:!ring-error-500/40 dark:hover:!bg-error-500/10"
+              onClick={() => setDeleteAllOpen(true)}
+              disabled={sources.length === 0}
+            >
+              Eliminar todas
+            </Button>
             <Button size="sm" variant="outline" onClick={() => fileInputRef.current?.click()} disabled={importing}>
               {importing ? "Importando..." : "Importar Excel"}
             </Button>
@@ -309,6 +336,14 @@ export default function Sources() {
         message={`¿Eliminar la fuente "${deleteTarget?.name}"? Esto también borra sus publicaciones asociadas si las hubiera.`}
         onConfirm={confirmDelete}
         onCancel={cancelDelete}
+      />
+      <ConfirmDialog
+        isOpen={deleteAllOpen}
+        title="Eliminar todas las fuentes"
+        message={`¿Eliminar las ${sources.length} fuentes? También se borrarán todas sus publicaciones, análisis y alertas asociadas. Esta acción no se puede deshacer.`}
+        confirmLabel={deletingAll ? "Eliminando..." : "Eliminar todas"}
+        onConfirm={confirmDeleteAll}
+        onCancel={() => !deletingAll && setDeleteAllOpen(false)}
       />
     </>
   );
