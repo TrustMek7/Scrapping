@@ -5,10 +5,11 @@ import Sources from "./pages/Monitoring/Sources";
 import Entities from "./pages/Monitoring/Entities";
 import AppLayout from "./layout/AppLayout";
 import { ScrollToTop } from "./components/common/ScrollToTop";
+import { ReviewProvider } from "./context/ReviewContext";
 
 export default function App() {
   return (
-    <Router>
+    <ReviewProvider><Router>
       <ScrollToTop />
       <Routes>
         <Route element={<AppLayout />}>
@@ -21,6 +22,6 @@ export default function App() {
         {/* Ruta no encontrada */}
         <Route path="*" element={<NotFound />} />
       </Routes>
-    </Router>
+    </Router></ReviewProvider>
   );
 }

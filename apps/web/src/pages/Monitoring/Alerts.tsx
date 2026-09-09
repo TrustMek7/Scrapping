@@ -16,6 +16,7 @@ import Select from "../../components/form/Select";
 import { Modal } from "../../components/ui/modal";
 import ConfirmDialog from "../../components/common/ConfirmDialog";
 import { useToast } from "../../context/ToastContext";
+import { useReview } from "../../context/ReviewContext";
 import {
   checkAllFacebookSources,
   checkFacebookSource,
@@ -26,7 +27,6 @@ import {
   fetchAutoCheckStatus,
   fetchFacebookSession,
   getCachedFacebookSession,
-  fetchFacebookCheckStatus,
   fetchRecentPublications,
   fetchSources,
   loginFacebook,
@@ -57,6 +57,7 @@ const SESSION_LABEL: Record<FacebookSessionStatus | "checking" | "error", string
 
 export default function MonitoringAlerts() {
   const toast = useToast();
+  const review = useReview();
   const [alerts, setAlerts] = useState<AlertListItem[]>([]);
   const [exporting, setExporting] = useState(false);
   const [exportingHistory, setExportingHistory] = useState(false);
@@ -121,20 +122,25 @@ export default function MonitoringAlerts() {
     fetchAutoCheckStatus()
       .then(setAutoCheckState)
       .catch(() => undefined);
-    fetchFacebookCheckStatus()
-      .then((status) => setCheckRunning(status.running))
-      .catch(() => undefined);
   }, []);
 
   useEffect(() => {
-    if (!checkRunning) return;
-    const timer = window.setInterval(() => {
-      fetchFacebookCheckStatus()
-        .then((status) => setCheckRunning(status.running))
-        .catch(() => undefined);
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [checkRunning]);
+    setCheckRunning(review?.running ?? false);
+  }, [review?.running]);
+
+  useEffect(() => {
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      const results = await Promise.allSettled([fetchAlerts(), fetchRecentPublications()]);
+      if (disposed) return;
+      if (results[0].status === "fulfilled") setAlerts(results[0].value);
+      if (results[1].status === "fulfilled") setRecentPublications(results[1].value);
+      if (review?.running || checking || checkingAll) timer = setTimeout(refresh, 2000);
+    };
+    void refresh();
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [review?.running, checking, checkingAll]);
 
   const alertSourceOptions = useMemo(
     () => [...new Set(alerts.map((alert) => alert.publication.source.name))].sort((a, b) => a.localeCompare(b)),
@@ -236,20 +242,14 @@ export default function MonitoringAlerts() {
   };
 
   const handleCheckAll = async () => {
-    let reloadAfterCompletion = false;
     cancelRequestedRef.current = false;
     setCheckingAll(true);
     setCheckRunning(true);
     setCheckingAllResults([]);
     setCheckingAllInitialPublicationCount(recentPublications.length);
-    const pollTimer = window.setInterval(() => {
-      fetchAlerts().then(setAlerts).catch(() => undefined);
-      fetchRecentPublications().then(setRecentPublications).catch(() => undefined);
-    }, 2000);
 
     try {
       const results = await checkAllFacebookSources();
-      reloadAfterCompletion = !cancelRequestedRef.current && results.length > 0;
       setCheckingAllResults(results);
       console.log("[checkAllFacebookSources] respuesta del backend:", results);
       const newPublications = results.reduce((sum, r) => sum + (r.newPublications ?? 0), 0);
@@ -275,16 +275,11 @@ export default function MonitoringAlerts() {
     } catch (err) {
       toast.error((err as Error).message);
     } finally {
-      window.clearInterval(pollTimer);
       setCheckingAll(false);
       setCheckRunning(false);
       cancelRequestedRef.current = false;
-      if (reloadAfterCompletion) {
-        window.location.reload();
-      } else {
-        load();
-        loadRecentPublications();
-      }
+      load();
+      loadRecentPublications();
     }
   };
 
@@ -528,7 +523,7 @@ export default function MonitoringAlerts() {
             <Button
               size="sm"
               onClick={() => handleCheckSource(true)}
-              disabled={checking || checkingAll || sessionStatus !== "active" || !selectedSourceId}
+              disabled={checkRunning || checking || checkingAll || sessionStatus !== "active" || !selectedSourceId}
             >
               {checking ? "Revisando..." : "Revisar publicaciones nuevas"}
             </Button>
@@ -536,7 +531,7 @@ export default function MonitoringAlerts() {
               size="sm"
               variant="outline"
               onClick={() => handleCheckSource(false)}
-              disabled={checking || checkingAll || sessionStatus !== "active" || !selectedSourceId}
+              disabled={checkRunning || checking || checkingAll || sessionStatus !== "active" || !selectedSourceId}
             >
               {checking ? "Revisando..." : "Ver en vivo (debug)"}
             </Button>
@@ -544,7 +539,7 @@ export default function MonitoringAlerts() {
               size="sm"
               variant="outline"
               onClick={handleCheckAll}
-              disabled={checking || checkingAll || sessionStatus !== "active" || facebookSources.length === 0}
+              disabled={checkRunning || checking || checkingAll || sessionStatus !== "active" || facebookSources.length === 0}
             >
               {checkingAll ? "Revisando todas..." : `Revisar todas (${facebookSources.length})`}
             </Button>
@@ -754,6 +749,11 @@ export default function MonitoringAlerts() {
                       <TableRow key={pub.id}>
                         <TableCell className="px-5 py-4 text-start font-medium text-gray-800 text-theme-sm dark:text-white/90">
                           {pub.source.name}
+                          <div className="mt-1" title="Nueva: incorporada desde el inicio de la última revisión. Ya registrada: existía anteriormente; no indica revisión humana.">
+                            <Badge size="sm" color={review?.startedAt && new Date(pub.createdAt) >= new Date(review.startedAt) ? "success" : "info"}>
+                              {review?.startedAt && new Date(pub.createdAt) >= new Date(review.startedAt) ? "Nueva" : "Ya registrada"}
+                            </Badge>
+                          </div>
                         </TableCell>
                         <TableCell className="px-4 py-3 max-w-md text-gray-500 text-start text-theme-sm dark:text-gray-400">
                           {pub.content.slice(0, 140)}

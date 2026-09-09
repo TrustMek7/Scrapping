@@ -41,7 +41,8 @@ export interface CheckAllSourcesResultItem {
 @Injectable()
 export class FacebookService {
   private readonly logger = new Logger(FacebookService.name);
-  private activeCheck: { cancellationRequested: boolean } | null = null;
+  private activeCheck: { cancellationRequested: boolean; startedAt: string; sourceName: string | null; sourceIndex: number; totalSources: number } | null = null;
+  private lastCheckStartedAt: string | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -68,6 +69,10 @@ export class FacebookService {
     return {
       running: this.activeCheck !== null,
       cancellationRequested: this.activeCheck?.cancellationRequested ?? false,
+      startedAt: this.activeCheck?.startedAt ?? this.lastCheckStartedAt,
+      sourceName: this.activeCheck?.sourceName ?? null,
+      sourceIndex: this.activeCheck?.sourceIndex ?? 0,
+      totalSources: this.activeCheck?.totalSources ?? 0,
     };
   }
 
@@ -82,7 +87,8 @@ export class FacebookService {
     if (this.activeCheck) {
       throw new ConflictException("Ya hay una revisión de Facebook en ejecución.");
     }
-    const check = { cancellationRequested: false };
+    const check = { cancellationRequested: false, startedAt: new Date().toISOString(), sourceName: null as string | null, sourceIndex: 0, totalSources: 0 };
+    this.lastCheckStartedAt = check.startedAt;
     this.activeCheck = check;
     return check;
   }
@@ -113,6 +119,9 @@ export class FacebookService {
     }
 
     const check = this.beginCheck();
+    check.sourceName = source.name;
+    check.sourceIndex = 1;
+    check.totalSources = 1;
     try {
       return await this.checkSource(
         source,
@@ -278,6 +287,7 @@ export class FacebookService {
     }
 
     const check = this.beginCheck();
+    check.totalSources = sources.length;
     try {
       const results: CheckAllSourcesResultItem[] = [];
       const batchTimeoutMs = Math.max(MIN_BATCH_TIMEOUT_MS, sources.length * PER_SOURCE_TIMEOUT_MS);
@@ -287,6 +297,8 @@ export class FacebookService {
         async (context) => {
           for (const source of sources) {
             if (check.cancellationRequested) break;
+            check.sourceName = source.name;
+            check.sourceIndex += 1;
             try {
               const outcomes = await this.checkSource(
                 source,

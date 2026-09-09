@@ -227,6 +227,10 @@ export const checkAllFacebookSources = () =>
 export interface FacebookCheckStatus {
   running: boolean;
   cancellationRequested: boolean;
+  startedAt: string | null;
+  sourceName: string | null;
+  sourceIndex: number;
+  totalSources: number;
 }
 
 export const fetchFacebookCheckStatus = () =>
