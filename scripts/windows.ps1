@@ -72,8 +72,17 @@ try {
     if ($Mode -eq 'Install') {
         $manager = (Get-Content -LiteralPath 'package.json' -Raw | ConvertFrom-Json).packageManager
         Run 'npm.cmd' @('install', '-g', $manager)
-        $npmPrefix = (& npm.cmd prefix -g).Trim()
-        $env:PATH = "$npmPrefix;$env:PATH"
+    }
+    # Una terminal abierta antes de instalar pnpm conserva el PATH anterior.
+    # Resuelve el prefijo real de npm tambien durante el arranque cotidiano.
+    if (Get-Command npm.cmd -ErrorAction SilentlyContinue) {
+        $prefixOutput = & npm.cmd prefix -g
+        if ($LASTEXITCODE -eq 0 -and $prefixOutput) {
+            $npmPrefix = ($prefixOutput | Select-Object -Last 1).Trim()
+            if (Test-Path -LiteralPath (Join-Path $npmPrefix 'pnpm.cmd')) {
+                $env:PATH = "$npmPrefix;$env:PATH"
+            }
+        }
     }
     if (-not (Get-Command pnpm.cmd -ErrorAction SilentlyContinue)) { throw 'Falta pnpm. Ejecuta instalar.bat.' }
     Docker-Ready
@@ -130,6 +139,17 @@ try {
         Write-Host 'Instalacion terminada. Ejecuta init.bat para iniciar.'
     } else {
         if (-not (Test-Path -LiteralPath 'apps/backend/dist/main.js') -or -not (Test-Path -LiteralPath 'apps/web/dist/index.html')) { throw 'Falta la compilacion. Ejecuta instalar.bat.' }
+        $backendUrl = "http://127.0.0.1:$($config.PORT)/health"
+        $webUrl = 'http://127.0.0.1:5173'
+        try {
+            $health = Invoke-RestMethod $backendUrl -TimeoutSec 5
+            $web = Invoke-WebRequest $webUrl -UseBasicParsing -TimeoutSec 5
+            if ($health.status -eq 'ok' -and $health.database -eq 'ok' -and $web.StatusCode -eq 200) {
+                Start-Process $webUrl
+                Write-Host "La aplicacion ya esta iniciada en $webUrl"
+                exit 0
+            }
+        } catch { }
         foreach ($portNumber in @([int]$config.PORT, 5173)) {
             if (Get-NetTCPConnection -State Listen -LocalPort $portNumber -ErrorAction SilentlyContinue) { throw "Puerto $portNumber ocupado. Comprueba si la aplicacion ya esta iniciada." }
         }
@@ -144,13 +164,14 @@ try {
         $ready = $false
         for ($i = 0; $i -lt 60; $i++) {
             try {
-                Invoke-WebRequest "http://localhost:$($config.PORT)/health" -UseBasicParsing -TimeoutSec 2 | Out-Null
-                Invoke-WebRequest 'http://localhost:5173' -UseBasicParsing -TimeoutSec 2 | Out-Null
+                $health = Invoke-RestMethod $backendUrl -TimeoutSec 5
+                if ($health.status -ne 'ok' -or $health.database -ne 'ok') { throw 'El backend responde pero la base de datos no esta disponible.' }
+                Invoke-WebRequest $webUrl -UseBasicParsing -TimeoutSec 5 | Out-Null
                 $ready = $true; break
             } catch { Start-Sleep -Seconds 2 }
         }
-        if (-not $ready) { throw 'Los servidores no respondieron. Verifica la compilacion y la configuracion.' }
-        Start-Process 'http://localhost:5173'
-        Write-Host 'Aplicacion iniciada en http://localhost:5173'
+        if (-not $ready) { throw "Los servidores no respondieron en $backendUrl y $webUrl. Revisa logs/backend-error.log y logs/web-error.log." }
+        Start-Process $webUrl
+        Write-Host "Aplicacion iniciada en $webUrl"
     }
 } catch { Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red; exit 1 }
