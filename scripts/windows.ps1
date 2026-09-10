@@ -87,6 +87,10 @@ try {
     if (-not (Get-Command pnpm.cmd -ErrorAction SilentlyContinue)) { throw 'Falta pnpm. Ejecuta instalar.bat.' }
     Docker-Ready
     Run 'docker.exe' @('compose', 'version')
+    if ($Mode -eq 'Start') {
+        Write-Host 'Compilando la version actual...'
+        Run 'pnpm.cmd' @('build')
+    }
     if ($Mode -eq 'Install') {
         $defaults = @{ POSTGRES_USER='scrapping'; POSTGRES_PASSWORD='scrapping'; POSTGRES_DB='scrapping'; POSTGRES_PORT='5433'; PORT='3200'; DEEPSEEK_MODEL='deepseek-v4-flash'; ALERT_CATEGORIES='DENUNCIA,ALLEGATION,SCANDAL'; ALERT_MIN_CONFIDENCE='0.6'; GMAIL_USER=''; EMAIL_TO='jhaas3585@gmail.com'; EMAIL_FROM='' }
         foreach ($key in $defaults.Keys) { if (-not $config.ContainsKey($key)) { $config[$key] = $defaults[$key] } }
