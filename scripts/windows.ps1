@@ -85,12 +85,15 @@ try {
         }
     }
     if (-not (Get-Command pnpm.cmd -ErrorAction SilentlyContinue)) { throw 'Falta pnpm. Ejecuta instalar.bat.' }
+    if ($Mode -eq 'Start') {
+        if (-not (Get-Command git.exe -ErrorAction SilentlyContinue)) { throw 'Falta Git. Ejecuta instalar.bat.' }
+        Write-Host 'Actualizando el repositorio...'
+        Run 'git.exe' @('pull', '--ff-only')
+        Write-Host 'Instalando dependencias...'
+        Run 'pnpm.cmd' @('install', '--frozen-lockfile')
+    }
     Docker-Ready
     Run 'docker.exe' @('compose', 'version')
-    if ($Mode -eq 'Start') {
-        Write-Host 'Compilando la version actual...'
-        Run 'pnpm.cmd' @('build')
-    }
     if ($Mode -eq 'Install') {
         $defaults = @{ POSTGRES_USER='scrapping'; POSTGRES_PASSWORD='scrapping'; POSTGRES_DB='scrapping'; POSTGRES_PORT='5433'; PORT='3200'; DEEPSEEK_MODEL='deepseek-v4-flash'; ALERT_CATEGORIES='DENUNCIA,ALLEGATION,SCANDAL'; ALERT_MIN_CONFIDENCE='0.6'; GMAIL_USER=''; EMAIL_TO='jhaas3585@gmail.com'; EMAIL_FROM='' }
         foreach ($key in $defaults.Keys) { if (-not $config.ContainsKey($key)) { $config[$key] = $defaults[$key] } }
@@ -143,6 +146,8 @@ try {
         Run 'pnpm.cmd' @('build')
         Write-Host 'Instalacion terminada. Ejecuta init.bat para iniciar.'
     } else {
+        Write-Host 'Compilando la version actual...'
+        Run 'pnpm.cmd' @('build')
         if (-not (Test-Path -LiteralPath 'apps/backend/dist/main.js') -or -not (Test-Path -LiteralPath 'apps/web/dist/index.html')) { throw 'Falta la compilacion. Ejecuta instalar.bat.' }
         $backendUrl = "http://127.0.0.1:$($config.PORT)/health"
         $webUrl = 'http://127.0.0.1:5173'
