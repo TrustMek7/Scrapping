@@ -16,6 +16,17 @@ const REQUIRED_POST_LIMIT = 10;
 const PER_SOURCE_TIMEOUT_MS = 90 * 1000;
 const MIN_BATCH_TIMEOUT_MS = 11 * 60 * 1000;
 
+export function describeMissingText(post: Pick<FacebookPost, "kind" | "images">): string {
+  switch (post.kind) {
+    case "LIVE": return "Transmisión en vivo sin texto extraíble; no hay transcripción configurada.";
+    case "VIDEO": return "Video sin texto extraíble; no hay transcripción configurada.";
+    case "REEL": return "Reel sin texto extraíble; no hay transcripción configurada.";
+    default: return post.images.length
+      ? "Imagen sin texto extraíble; no hay OCR configurado."
+      : "No se pudo extraer texto ni imágenes; la publicación podría estar vacía o no haberse cargado completamente.";
+  }
+}
+
 export interface CheckSourcePostOutcome {
   url: string;
   kind: FacebookPost["kind"];
@@ -30,6 +41,7 @@ export interface CheckSourcePostOutcome {
 }
 
 export interface CheckAllSourcesResultItem {
+  warnings?: string[];
   sourceId: string;
   sourceName: string;
   ok: boolean;
@@ -41,7 +53,7 @@ export interface CheckAllSourcesResultItem {
 @Injectable()
 export class FacebookService {
   private readonly logger = new Logger(FacebookService.name);
-  private activeCheck: { cancellationRequested: boolean; startedAt: string; sourceName: string | null; sourceIndex: number; totalSources: number } | null = null;
+  private activeCheck: { cancellationRequested: boolean; startedAt: string; sourceName: string | null; sourceIndex: number; totalSources: number; reviewRunId?: number; warnings: string[] } | null = null;
   private lastCheckStartedAt: string | null = null;
 
   constructor(
@@ -73,6 +85,8 @@ export class FacebookService {
       sourceName: this.activeCheck?.sourceName ?? null,
       sourceIndex: this.activeCheck?.sourceIndex ?? 0,
       totalSources: this.activeCheck?.totalSources ?? 0,
+      reviewRunId: this.activeCheck?.reviewRunId ?? null,
+      warnings: this.activeCheck?.warnings ?? [],
     };
   }
 
@@ -87,7 +101,7 @@ export class FacebookService {
     if (this.activeCheck) {
       throw new ConflictException("Ya hay una revisión de Facebook en ejecución.");
     }
-    const check = { cancellationRequested: false, startedAt: new Date().toISOString(), sourceName: null as string | null, sourceIndex: 0, totalSources: 0 };
+    const check = { cancellationRequested: false, startedAt: new Date().toISOString(), sourceName: null as string | null, sourceIndex: 0, totalSources: 0, reviewRunId: undefined as number | undefined, warnings: [] as string[] };
     this.lastCheckStartedAt = check.startedAt;
     this.activeCheck = check;
     return check;
@@ -123,6 +137,7 @@ export class FacebookService {
     check.sourceIndex = 1;
     check.totalSources = 1;
     try {
+      check.reviewRunId = (await this.prisma.reviewRun.create({ data: {} })).id;
       return await this.checkSource(
         source,
         (pageUrl, onPost, knownPostUrls, shouldCancel) =>
@@ -180,7 +195,11 @@ export class FacebookService {
       await walkPosts(pageUrl, async (post) => {
         if (shouldCancel()) return { stop: true };
         if (!post.text || post.text.trim().length === 0) {
+          const noTextReason = describeMissingText(post);
+          this.activeCheck?.warnings.push(`${source.name}: ${noTextReason}`);
           const result = await this.analysisService.persistWithoutText({
+            reviewRunId: this.activeCheck?.reviewRunId,
+            noTextReason,
             sourceId: source.id,
             title: `Publicación de ${post.author.name ?? source.name}`,
             content: "",
@@ -197,7 +216,8 @@ export class FacebookService {
             textLength: 0,
             textTruncated: false,
             ok: false,
-            error: "Esta publicación no tiene texto (parece ser solo imagen/video). Todavía no hay OCR configurado.",
+            error: noTextReason,
+            deduplicated: result.deduplicated,
           });
           return { stop: false };
         }
@@ -207,6 +227,7 @@ export class FacebookService {
         // pasar a la siguiente (ver runAndPersist/maybeCreateAlert en AnalysisService).
         const analysisStartedAt = Date.now();
         const result = await this.analysisService.runAndPersist({
+          reviewRunId: this.activeCheck?.reviewRunId,
           sourceId: source.id,
           title: `Publicación de ${post.author.name ?? source.name}`,
           content: post.text,
@@ -289,6 +310,7 @@ export class FacebookService {
     const check = this.beginCheck();
     check.totalSources = sources.length;
     try {
+      check.reviewRunId = (await this.prisma.reviewRun.create({ data: {} })).id;
       const results: CheckAllSourcesResultItem[] = [];
       const batchTimeoutMs = Math.max(MIN_BATCH_TIMEOUT_MS, sources.length * PER_SOURCE_TIMEOUT_MS);
 
@@ -319,6 +341,7 @@ export class FacebookService {
                 ok: true,
                 newPublications: outcomes.filter((o) => o.ok && !o.deduplicated).length,
                 newAlerts: outcomes.filter((o) => o.alertCreated).length,
+                warnings: outcomes.flatMap((o) => o.error ? [o.error] : []),
               });
             } catch (error) {
               const message = error instanceof Error ? error.message : "Error desconocido.";

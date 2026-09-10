@@ -14,6 +14,8 @@ export interface PublicationImageInput {
 }
 
 export interface RunAnalysisInput {
+  reviewRunId?: number;
+  noTextReason?: string;
   sourceId: string;
   title: string;
   content: string;
@@ -166,6 +168,7 @@ export class AnalysisService {
 
     const publication = await this.prisma.publication.create({
       data: {
+        reviewRunId: input.reviewRunId,
         sourceId: input.sourceId,
         externalId: input.externalId,
         title: input.title,
@@ -248,6 +251,7 @@ export class AnalysisService {
 
     const publication = await this.prisma.publication.create({
       data: {
+        reviewRunId: input.reviewRunId,
         sourceId: input.sourceId,
         externalId: input.externalId,
         title: input.title,
@@ -262,7 +266,7 @@ export class AnalysisService {
       data: {
         publicationId: publication.id,
         status: "FAILED",
-        error: "La publicación no tiene texto extraíble; todavía no hay OCR o transcripción configurados.",
+        error: input.noTextReason ?? "No se pudo extraer texto de la publicación.",
       },
     });
 
@@ -302,8 +306,9 @@ export class AnalysisService {
   /** Lista las últimas publicaciones analizadas, tengan o no alerta — registro/historial de revisiones. */
   async listRecent() {
     const publications = await this.prisma.publication.findMany({
+      where: { analysis: { is: { relevant: true } } },
       orderBy: { createdAt: "desc" },
-      include: { source: { select: { name: true } }, analysis: true },
+      include: { source: { select: { name: true } }, analysis: true, entities: { include: { entity: { select: { name: true, aliases: true } } } } },
     });
 
     // Publicaciones creadas antes de agregar la columna "images" quedaron con NULL

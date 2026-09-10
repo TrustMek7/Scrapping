@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { fetchFacebookCheckStatus, type FacebookCheckStatus } from "../lib/api";
 
 const ReviewContext = createContext<FacebookCheckStatus | null>(null);
@@ -12,7 +13,7 @@ export function ReviewProvider({ children }: { children: ReactNode }) {
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       try {
-        const next = await fetchFacebookCheckStatus();
+        const next = await fetchFacebookCheckStatus(AbortSignal.timeout(10000));
         if (!disposed) { setStatus(next); setUnavailable(false); }
       } catch {
         if (!disposed) setUnavailable(true);
@@ -25,11 +26,13 @@ export function ReviewProvider({ children }: { children: ReactNode }) {
   }, []);
   return <ReviewContext.Provider value={status}>
     {children}
-    {status?.running && <div role="status" aria-live="polite" className="fixed bottom-4 right-4 z-99999 max-w-sm rounded-lg border border-brand-200 bg-white p-4 text-sm shadow-lg dark:bg-gray-900 dark:text-white">
+    {status?.running && createPortal(<div role="status" aria-live="polite" className="fixed bottom-4 right-4 z-[100000] max-w-sm rounded-lg border border-brand-200 bg-white p-4 text-sm shadow-lg dark:bg-gray-900 dark:text-white">
       <div className="flex items-center gap-2 font-medium"><span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 border-brand-500 border-t-transparent" />
         {unavailable ? "Sin conexión. Intentando recuperar el progreso…" : status.cancellationRequested ? "Deteniendo revisión…" : "Ejecutando revisión"}
       </div>
       <p className="mt-1">{status.sourceName ? `Fuente: ${status.sourceName} · ${status.sourceIndex}/${status.totalSources}` : "Preparando fuentes…"}</p>
-    </div>}
+      {status.reviewRunId && <p>Revisión #{status.reviewRunId}</p>}
+      {status.warnings?.length > 0 && <p className="mt-2 text-red-700 dark:text-red-400">{status.warnings[status.warnings.length - 1]}</p>}
+    </div>, document.body)}
   </ReviewContext.Provider>;
 }

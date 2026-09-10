@@ -25,6 +25,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export interface AlertListItem {
+  analysis: { reason: string | null; claims: { text: string; type: string }[] | null };
   id: string;
   category: ContentCategory;
   severity: Severity;
@@ -32,13 +33,16 @@ export interface AlertListItem {
   summary: string;
   createdAt: string;
   publication: {
+    content: string;
+    reviewRunId: number | null;
+    entities: { entity: { name: string; aliases: string[] } }[];
     id: string;
     title: string;
     url: string;
     publishedAt: string | null;
     source: { name: string };
   };
-  entity: { id: string; name: string };
+  entity: { id: string; name: string; aliases: string[] };
   notifications: { id: string; channel: string; status: string; sentAt: string | null }[];
 }
 
@@ -209,6 +213,7 @@ export const checkFacebookSource = (sourceId: string, headless = true) => {
 };
 
 export interface CheckAllSourcesResultItem {
+  warnings?: string[];
   sourceId: string;
   sourceName: string;
   ok: boolean;
@@ -225,6 +230,8 @@ export const checkAllFacebookSources = () =>
 
 /** Temporal: para verificar el pipeline de análisis aunque no genere alerta. */
 export interface FacebookCheckStatus {
+  reviewRunId: number | null;
+  warnings: string[];
   running: boolean;
   cancellationRequested: boolean;
   startedAt: string | null;
@@ -233,13 +240,15 @@ export interface FacebookCheckStatus {
   totalSources: number;
 }
 
-export const fetchFacebookCheckStatus = () =>
-  request<FacebookCheckStatus>("/facebook/check/status");
+export const fetchFacebookCheckStatus = (signal?: AbortSignal) =>
+  request<FacebookCheckStatus>("/facebook/check/status", { signal });
 
 export const cancelFacebookCheck = () =>
   request<FacebookCheckStatus>("/facebook/check/cancel", { method: "POST" });
 
 export interface RecentPublicationItem {
+  reviewRunId: number | null;
+  entities: { entity: { name: string; aliases: string[] } }[];
   id: string;
   title: string;
   content: string;
@@ -248,6 +257,8 @@ export interface RecentPublicationItem {
   source: { name: string };
   images: { url: string; alt: string | null; width: number; height: number }[];
   analysis: {
+    reason: string | null;
+    claims: { text: string; type: string }[] | null;
     status: "PENDING" | "COMPLETED" | "FAILED";
     relevant: boolean | null;
     category: ContentCategory | null;

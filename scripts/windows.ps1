@@ -135,8 +135,9 @@ try {
         Run 'pnpm.cmd' @('install', '--frozen-lockfile')
     } elseif (-not (Test-Path -LiteralPath '.env')) { throw 'Falta .env. Ejecuta instalar.bat.' }
     Run 'docker.exe' @('compose', 'up', '-d', '--wait', '--wait-timeout', '120', 'postgres')
+    # Aplica tambien las migraciones pendientes al actualizar una copia existente.
+    Run 'pnpm.cmd' @('exec', 'prisma', 'migrate', 'deploy')
     if ($Mode -eq 'Install') {
-        Run 'pnpm.cmd' @('exec', 'prisma', 'migrate', 'deploy')
         Run 'pnpm.cmd' @('db:generate')
         Run 'pnpm.cmd' @('--filter', 'backend', 'exec', 'playwright', 'install', 'chromium')
         Run 'pnpm.cmd' @('build')

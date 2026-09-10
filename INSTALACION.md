@@ -18,4 +18,8 @@ Ayuda para Docker/WSL (terminal como administrador si Windows lo requiere): `wsl
 
 Se usan `npm.cmd` y `pnpm.cmd` para evitar el bloqueo de scripts `.ps1`. Los lanzadores aplican Bypass solo al proceso actual; no cambian la politica del usuario. Para otros usos de PowerShell, la solucion opcional al error de scripts es `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`.
 
-Las etiquetas del historial son relativas al inicio de la ultima revision del backend: **Nueva** si se incorporo desde entonces y **Ya registrada** si existia antes. No indican lectura o aprobacion humana. Al reiniciar el backend se pierde ese punto de referencia y todas aparecen como ya registradas.
+El historial muestra solo publicaciones con `relevant: true`; los demas registros se conservan internamente para deduplicacion. Cada publicacion nueva conserva el numero de la revision que la incorporo. Se puede filtrar por revision y ese numero se incluye en el Excel. Los datos anteriores a esta funcion aparecen como "Registro anterior"; no se inventan numeros retroactivos. Las etiquetas Nueva/Ya registrada son relativas al inicio de la ultima revision del proceso actual y no indican aprobacion humana.
+
+Al actualizar una instalacion existente, ejecuta `pnpm db:generate` y `pnpm build` antes de arrancar. `init.bat` aplica las migraciones pendientes despues de iniciar PostgreSQL. La migracion de revisiones agrega ReviewRun y una relacion opcional; no borra publicaciones existentes. El instalador inicial ya ejecuta estos pasos.
+
+El aviso de progreso es global y permanece al navegar entre Alertas, Fuentes y Parametros. Iniciar revision aparece en verde y Detener revision en rojo. Categorias y severidades se muestran en espanol. El resaltado marca nombres/alias y afirmaciones que coinciden literalmente con el texto mostrado; el motivo de la IA se presenta aparte, identificado como interpretacion y no como un hecho comprobado.

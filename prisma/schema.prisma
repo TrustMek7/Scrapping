@@ -92,6 +92,12 @@ model MonitoredEntity {
   alerts              Alert[]
 }
 
+model ReviewRun {
+  id Int @id @default(autoincrement())
+  startedAt DateTime @default(now())
+  publications Publication[]
+}
+
 model Publication {
   id           String    @id @default(cuid())
   sourceId     String
@@ -105,6 +111,8 @@ model Publication {
   publishedAt  DateTime?
   images       Json?
   createdAt    DateTime  @default(now())
+  reviewRunId  Int?
+  reviewRun    ReviewRun? @relation(fields: [reviewRunId], references: [id], onDelete: SetNull)
 
   entities PublicationEntity[]
   analysis Analysis?
@@ -112,6 +120,7 @@ model Publication {
 
   @@unique([sourceId, externalId])
   @@index([url])
+  @@index([reviewRunId])
 }
 
 model PublicationEntity {

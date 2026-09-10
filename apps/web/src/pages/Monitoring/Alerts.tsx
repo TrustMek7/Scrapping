@@ -17,6 +17,8 @@ import { Modal } from "../../components/ui/modal";
 import ConfirmDialog from "../../components/common/ConfirmDialog";
 import { useToast } from "../../context/ToastContext";
 import { useReview } from "../../context/ReviewContext";
+import { spanishLabel } from "../../lib/labels";
+import HighlightedText from "../../components/common/HighlightedText";
 import {
   checkAllFacebookSources,
   checkFacebookSource,
@@ -68,6 +70,7 @@ export default function MonitoringAlerts() {
   const [recentPublications, setRecentPublications] = useState<RecentPublicationItem[]>([]);
   const [alertSourceFilter, setAlertSourceFilter] = useState("ALL");
   const [historySourceFilter, setHistorySourceFilter] = useState("ALL");
+  const [historyReviewFilter, setHistoryReviewFilter] = useState("ALL");
   const [imagesModalPub, setImagesModalPub] = useState<RecentPublicationItem | null>(null);
   const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
 
@@ -156,9 +159,11 @@ export default function MonitoringAlerts() {
   );
   const filteredRecentPublications = useMemo(
     () => recentPublications.filter(
-      (publication) => historySourceFilter === "ALL" || publication.source.name === historySourceFilter,
+      (publication) => publication.analysis?.relevant === true &&
+        (historySourceFilter === "ALL" || publication.source.name === historySourceFilter) &&
+        (historyReviewFilter === "ALL" || String(publication.reviewRunId ?? "LEGACY") === historyReviewFilter),
     ),
-    [recentPublications, historySourceFilter],
+    [recentPublications, historySourceFilter, historyReviewFilter],
   );
 
   const handleToggleAutoCheck = async () => {
@@ -216,6 +221,7 @@ export default function MonitoringAlerts() {
       const newOnes = outcomes.filter((o) => o.ok && !o.deduplicated);
       const alerts = newOnes.filter((o) => o.alertCreated).length;
       const skipped = outcomes.filter((o) => !o.ok).length;
+      outcomes.filter((o) => o.error).forEach((o) => toast.error(o.error!));
 
       if (cancelRequestedRef.current) {
         toast.success("Revisión detenida.");
@@ -398,6 +404,7 @@ export default function MonitoringAlerts() {
         { header: "Enlace", key: "link", width: 55 },
         { header: "Resultado IA", key: "result", width: 70 },
         { header: "Fecha de registro", key: "createdAt", width: 24 },
+        { header: "Revisión", key: "review", width: 20 },
       ];
       filteredRecentPublications.forEach((publication, index) => {
         const analysis = publication.analysis;
@@ -408,7 +415,7 @@ export default function MonitoringAlerts() {
             : analysis.status === "PENDING"
               ? "Pendiente"
               : analysis.relevant
-                ? `Relevante · ${analysis.category ?? "Sin categoría"} · ${analysis.severity ?? "Sin severidad"}${analysis.summary ? ` | ${analysis.summary}` : ""}`
+                ? `Relevante · ${spanishLabel(analysis.category)} · ${spanishLabel(analysis.severity)}${analysis.summary ? ` | ${analysis.summary}` : ""}`
                 : "No relevante";
         const row = worksheet.addRow({
           source: publication.source.name,
@@ -416,6 +423,7 @@ export default function MonitoringAlerts() {
           link: { text: publication.url, hyperlink: publication.url },
           result,
           createdAt: new Date(publication.createdAt).toLocaleString(),
+          review: publication.reviewRunId ? `Revisión #${publication.reviewRunId}` : "Registro anterior",
         });
         row.eachCell((cell) => {
           cell.alignment = { vertical: "top", wrapText: true };
@@ -436,7 +444,7 @@ export default function MonitoringAlerts() {
         cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
       });
       worksheet.views = [{ state: "frozen", ySplit: 1 }];
-      worksheet.autoFilter = { from: "A1", to: `E${worksheet.rowCount}` };
+      worksheet.autoFilter = { from: "A1", to: `F${worksheet.rowCount}` };
       const buffer = await workbook.xlsx.writeBuffer();
       const blob = new Blob([buffer], {
         type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -537,23 +545,12 @@ export default function MonitoringAlerts() {
             </Button>
             <Button
               size="sm"
-              variant="outline"
-              onClick={handleCheckAll}
-              disabled={checkRunning || checking || checkingAll || sessionStatus !== "active" || facebookSources.length === 0}
+              className={checkRunning || checking || checkingAll ? "!bg-red-600 !text-white hover:!bg-red-700" : "!bg-green-700 !text-white hover:!bg-green-800"}
+              onClick={checkRunning || checking || checkingAll ? handleCancelCheck : handleCheckAll}
+              disabled={cancelPending || (!(checkRunning || checking || checkingAll) && (sessionStatus !== "active" || facebookSources.length === 0))}
             >
-              {checkingAll ? "Revisando todas..." : `Revisar todas (${facebookSources.length})`}
+              {cancelPending ? "Deteniendo..." : checkRunning || checking || checkingAll ? "Detener revisión" : `Iniciar revisión (${facebookSources.length} fuentes)`}
             </Button>
-            {(checkRunning || checking || checkingAll) && (
-              <Button
-                size="sm"
-                variant="outline"
-                className="!border-error-500 !text-error-500 hover:!bg-error-50 dark:hover:!bg-error-500/10"
-                onClick={handleCancelCheck}
-                disabled={cancelPending}
-              >
-                {cancelPending ? "Deteniendo..." : "Detener revisión"}
-              </Button>
-            )}
           </div>
           {checkingAll && (
             <p className="mt-3 text-sm text-gray-500 dark:text-gray-400">
@@ -567,6 +564,7 @@ export default function MonitoringAlerts() {
                   {result.ok
                     ? `${result.sourceName}: ${result.newPublications ?? 0} publicación(es) nueva(s), ${result.newAlerts ?? 0} alerta(s)`
                     : `${result.sourceName}: ${result.error}`}
+                  {result.warnings?.map((warning, index) => <span key={index} className="block text-red-700 dark:text-red-400">{warning}</span>)}
                 </p>
               ))}
             </div>
@@ -648,20 +646,24 @@ export default function MonitoringAlerts() {
                     {filteredAlerts.map((alert) => (
                       <TableRow key={alert.id}>
                         <TableCell className="px-5 py-4 text-start font-medium text-gray-800 text-theme-sm dark:text-white/90">
-                          {alert.entity.name}
+                          <strong className="text-red-700 dark:text-red-400">{alert.entity.name}</strong>
                         </TableCell>
                         <TableCell className="px-4 py-3 text-start text-theme-sm">
                           <Badge size="sm" color="primary">
-                            {alert.category}
+                            {spanishLabel(alert.category)}
                           </Badge>
                         </TableCell>
                         <TableCell className="px-4 py-3 text-start text-theme-sm">
                           <Badge size="sm" color={SEVERITY_COLOR[alert.severity]}>
-                            {alert.severity}
+                            {spanishLabel(alert.severity)}
                           </Badge>
                         </TableCell>
                         <TableCell className="px-4 py-3 max-w-md text-gray-500 text-start text-theme-sm dark:text-gray-400">
-                          {alert.summary}
+                          <HighlightedText text={alert.summary} terms={[alert.entity.name, ...(alert.entity.aliases ?? []), ...(alert.publication.entities ?? []).flatMap(e => [e.entity.name, ...e.entity.aliases]), ...(alert.analysis?.claims ?? []).map(c => c.text)]} />
+                          {alert.analysis?.reason && <p className="mt-2"><span>Motivo según el análisis: </span><strong className="text-red-700 dark:text-red-400">{alert.analysis.reason}</strong></p>}
+                          <details className="mt-2"><summary className="cursor-pointer">Ver texto original</summary>
+                            <HighlightedText text={alert.publication.content} terms={[alert.entity.name, ...(alert.entity.aliases ?? []), ...(alert.publication.entities ?? []).flatMap(e => [e.entity.name, ...e.entity.aliases]), ...(alert.analysis?.claims ?? []).map(c => c.text)]} />
+                          </details>
                         </TableCell>
                         <TableCell className="px-4 py-3 text-gray-500 text-start text-theme-sm dark:text-gray-400">
                           <a href={alert.publication.url} target="_blank" rel="noreferrer" className="text-brand-500 hover:underline">
@@ -670,6 +672,7 @@ export default function MonitoringAlerts() {
                         </TableCell>
                         <TableCell className="px-4 py-3 text-gray-500 text-start text-theme-sm dark:text-gray-400">
                           {new Date(alert.createdAt).toLocaleString()}
+                          <p>{alert.publication.reviewRunId ? `Revisión #${alert.publication.reviewRunId}` : "Registro anterior"}</p>
                         </TableCell>
                       </TableRow>
                     ))}
@@ -680,8 +683,15 @@ export default function MonitoringAlerts() {
           )}
         </ComponentCard>
 
-        <ComponentCard title="Historial de publicaciones revisadas">
+        <ComponentCard title="Historial de publicaciones relevantes">
           <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-56">
+              <Select options={[
+                { value: "ALL", label: "Todas las revisiones" },
+                ...[...new Set(recentPublications.map(p => p.reviewRunId).filter((id): id is number => id != null))].sort((a, b) => b - a).map(id => ({ value: String(id), label: `Revisión #${id}` })),
+                { value: "LEGACY", label: "Registros anteriores" },
+              ]} defaultValue="ALL" onChange={setHistoryReviewFilter} />
+            </div>
             <div className="min-w-56">
               <Select
                 options={[
@@ -715,11 +725,11 @@ export default function MonitoringAlerts() {
 
           {recentPublications.length === 0 ? (
             <p className="mt-4 text-gray-500 dark:text-gray-400">
-              Todavía no se revisó ninguna publicación.
+              Todavía no hay publicaciones clasificadas como relevantes.
             </p>
           ) : filteredRecentPublications.length === 0 ? (
             <p className="mt-4 text-gray-500 dark:text-gray-400">
-              No hay publicaciones para la fuente seleccionada.
+              No hay publicaciones relevantes para los filtros seleccionados.
             </p>
           ) : (
             <div className="mt-4 overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-white/[0.05] dark:bg-white/[0.03]">
@@ -749,6 +759,7 @@ export default function MonitoringAlerts() {
                       <TableRow key={pub.id}>
                         <TableCell className="px-5 py-4 text-start font-medium text-gray-800 text-theme-sm dark:text-white/90">
                           {pub.source.name}
+                          <p className="text-xs">{pub.reviewRunId ? `Revisión #${pub.reviewRunId}` : "Registro anterior"}</p>
                           <div className="mt-1" title="Nueva: incorporada desde el inicio de la última revisión. Ya registrada: existía anteriormente; no indica revisión humana.">
                             <Badge size="sm" color={review?.startedAt && new Date(pub.createdAt) >= new Date(review.startedAt) ? "success" : "info"}>
                               {review?.startedAt && new Date(pub.createdAt) >= new Date(review.startedAt) ? "Nueva" : "Ya registrada"}
@@ -756,7 +767,7 @@ export default function MonitoringAlerts() {
                           </div>
                         </TableCell>
                         <TableCell className="px-4 py-3 max-w-md text-gray-500 text-start text-theme-sm dark:text-gray-400">
-                          {pub.content.slice(0, 140)}
+                          <HighlightedText text={pub.content.slice(0, 140)} terms={[...(pub.entities ?? []).flatMap(e => [e.entity.name, ...e.entity.aliases]), ...(pub.analysis?.claims ?? []).map(c => c.text)]} />
                           {pub.content.length > 140 ? "…" : ""}
                           {pub.images.length > 0 && (
                             <button
@@ -784,13 +795,13 @@ export default function MonitoringAlerts() {
                             <Badge size="sm" color="info">Sin resultado</Badge>
                           ) : pub.analysis.relevant ? (
                             <Badge size="sm" color="error">
-                              Relevante · {pub.analysis.category} · {pub.analysis.severity}
+                              Relevante · {spanishLabel(pub.analysis.category)} · {spanishLabel(pub.analysis.severity)}
                             </Badge>
                           ) : (
                             <Badge size="sm" color="info">No relevante</Badge>
                           )}
                           {pub.analysis?.summary && (
-                            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{pub.analysis.summary}</p>
+                            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400"><HighlightedText text={pub.analysis.summary} terms={(pub.entities ?? []).flatMap(e => [e.entity.name, ...e.entity.aliases])} /></p>
                           )}
                         </TableCell>
                         <TableCell className="px-4 py-3 text-gray-500 text-start text-theme-sm dark:text-gray-400">

@@ -22,9 +22,10 @@ export class AlertsController {
       orderBy: { createdAt: "desc" },
       include: {
         publication: {
-          select: { id: true, title: true, url: true, publishedAt: true, source: { select: { name: true } } },
+          select: { id: true, title: true, content: true, reviewRunId: true, url: true, publishedAt: true, source: { select: { name: true } }, entities: { include: { entity: { select: { name: true, aliases: true } } } } },
         },
-        entity: { select: { id: true, name: true } },
+        entity: { select: { id: true, name: true, aliases: true } },
+        analysis: { select: { reason: true, claims: true } },
         notifications: {
           select: { id: true, channel: true, status: true, sentAt: true },
         },
