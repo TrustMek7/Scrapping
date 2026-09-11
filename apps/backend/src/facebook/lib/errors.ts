@@ -8,6 +8,8 @@ export type FacebookErrorCode =
   | "POST_NOT_ACCESSIBLE"
   | "EXTRACTION_FAILED"
   | "BROWSER_ERROR"
+  | "CONNECTION_ERROR"
+  | "TIMEOUT"
   | "UNKNOWN_ERROR";
 
 /**

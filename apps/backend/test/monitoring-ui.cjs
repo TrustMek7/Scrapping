@@ -19,6 +19,7 @@ test('progress survives route changes and network errors; labels and history rem
     page.on('pageerror', e => errors.push(e.message));
     let running = true;
     let offline = false;
+    let shutdownFails = true;
     const entity = { id: 'e', name: 'Ana Pérez', aliases: ['AP'], description: '', active: true };
     const publication = { id: 'p', reviewRunId: 12, title: 'Texto', content: 'AP: se reporta una acusación.', url: 'https://example.com/post', createdAt: '2026-09-10T12:00:00Z', images: [], source: { name: 'Fuente de prueba' }, entities: [{ entity }], analysis: { status: 'COMPLETED', relevant: true, category: 'ALLEGATION', severity: 'HIGH', summary: 'AP: se reporta una acusación.', reason: 'Se reporta una acusación.', claims: [{ text: 'se reporta una acusación', type: 'ALLEGATION' }] } };
     await page.route('**/*', async route => {
@@ -27,7 +28,15 @@ test('progress survives route changes and network errors; labels and history rem
       let data = [];
       if (url.pathname === '/facebook/check/status') {
         if (offline) return route.abort();
-        data = { running, cancellationRequested: false, startedAt: '2026-09-10T11:00:00Z', sourceName: 'Fuente de prueba', sourceIndex: 2, totalSources: 4, reviewRunId: 12, warnings: [] };
+        data = { id: 'review-12', phase: running ? 'RUNNING' : 'INTERRUPTED', error: running ? null : 'Sesión vencida', completedSources: 1, running, cancellationRequested: false, startedAt: '2026-09-10T11:00:00Z', sourceName: 'Fuente de prueba', sourceIndex: 2, totalSources: 4, reviewRunId: 12, warnings: [] };
+      } else if (url.pathname === '/facebook/sources/check-all') {
+        running = true;
+        return route.abort(); // The response is lost, but the backend keeps working.
+      } else if (url.pathname === '/system/shutdown') {
+        assert.equal(route.request().method(), 'POST');
+        assert.equal(route.request().headers()['x-scrapping-control'], 'shutdown');
+        if (shutdownFails) return route.fulfill({ status: 503, json: { message: 'Sin supervisor' } });
+        data = { accepted: true };
       } else if (url.pathname === '/facebook/session') data = { status: 'active' };
       else if (url.pathname === '/facebook/auto-check') data = { enabled: false, intervalMinutes: 60 };
       else if (url.pathname === '/sources') data = [{ id: 's', name: 'Fuente de prueba', url: 'https://example.com', type: 'FACEBOOK', status: 'ACTIVE', publicationsCount: 1 }];
@@ -37,7 +46,7 @@ test('progress survives route changes and network errors; labels and history rem
       await route.fulfill({ json: data });
     });
     await page.goto('http://127.0.0.1:5174/monitoreo/alertas');
-    await page.getByRole('status').waitFor();
+    await page.getByText('Ejecutando revisión', { exact: true }).waitFor();
     assert.match(await page.getByRole('status').innerText(), /2\/4/);
     await page.locator('a[href="/monitoreo/fuentes"]').first().click();
     await page.waitForURL('**/monitoreo/fuentes');
@@ -46,7 +55,7 @@ test('progress survives route changes and network errors; labels and history rem
     await page.waitForURL('**/monitoreo/entidades');
     assert.equal(await page.getByRole('status').isVisible(), true);
     offline = true;
-    await page.getByText('Sin conexión. Intentando recuperar el progreso…').waitFor();
+    await page.getByText('No se puede verificar el estado. Reconectando…').waitFor();
     assert.equal(await page.getByRole('status').isVisible(), true);
     offline = false;
     await page.locator('a[href="/monitoreo/alertas"]').first().click();
@@ -59,10 +68,29 @@ test('progress survives route changes and network errors; labels and history rem
     assert.ok(await page.locator('strong').filter({ hasText: 'AP' }).count());
     assert.ok(await page.getByText('Revisión #12', { exact: true }).count());
     running = false;
-    await page.getByRole('status').waitFor({ state: 'detached' });
+    await page.getByText('Revisión interrumpida', { exact: true }).waitFor();
+    assert.match(await page.getByRole('status').innerText(), /Sesión vencida/);
+    await page.getByRole('button', { name: 'Cerrar aviso' }).click();
     const start = page.getByRole('button', { name: /Iniciar revisión/ });
     await start.waitFor();
     assert.match(await start.getAttribute('class'), /bg-green/);
+    await start.click();
+    await page.getByRole('button', { name: 'Detener revisión' }).waitFor();
+    assert.match(await page.getByRole('status').innerText(), /Ejecutando revisión/);
+    offline = true;
+    await page.getByRole('button', { name: 'Verificando estado...' }).waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Verificando estado...' }).isDisabled(), true);
+    assert.match(await page.getByRole('button', { name: 'Verificando estado...' }).getAttribute('class'), /bg-amber/);
+    await page.getByRole('button', { name: 'Apagar sistema', exact: true }).click();
+    await page.getByRole('button', { name: 'Apagar', exact: true }).click();
+    await page.getByRole('alert').waitFor();
+    assert.match(await page.getByRole('alert').innerText(), /detener.bat/);
+    await page.getByRole('button', { name: 'Cerrar', exact: true }).click();
+    shutdownFails = false;
+    await page.getByRole('button', { name: 'Apagar sistema', exact: true }).click();
+    await page.getByRole('button', { name: 'Apagar', exact: true }).click();
+    await page.getByRole('alert').waitFor();
+    assert.match(await page.getByRole('alert').innerText(), /Apagado solicitado/);
     assert.deepEqual(errors, []);
   } finally {
     await browser?.close();

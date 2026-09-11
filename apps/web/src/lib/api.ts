@@ -11,6 +11,11 @@ import type {
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:3200";
 
+export const shutdownSystem = () => request<{ accepted: boolean }>("/system/shutdown", {
+  method: "POST", headers: { "Content-Type": "application/json", "X-Scrapping-Control": "shutdown" },
+  signal: AbortSignal.timeout(10000),
+});
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: { "Content-Type": "application/json" },
@@ -230,6 +235,11 @@ export const checkAllFacebookSources = () =>
 
 /** Temporal: para verificar el pipeline de análisis aunque no genere alerta. */
 export interface FacebookCheckStatus {
+  id: string | null;
+  phase: "IDLE" | "RUNNING" | "COMPLETED" | "CANCELLED" | "INTERRUPTED";
+  error: string | null;
+  completedSources: number;
+  finishedAt: string | null;
   reviewRunId: number | null;
   warnings: string[];
   running: boolean;

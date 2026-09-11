@@ -23,3 +23,13 @@ El historial muestra solo publicaciones con `relevant: true`; los demas registro
 Al actualizar una instalacion existente, ejecuta `pnpm db:generate` y `pnpm build` antes de arrancar. `init.bat` aplica las migraciones pendientes despues de iniciar PostgreSQL. La migracion de revisiones agrega ReviewRun y una relacion opcional; no borra publicaciones existentes. El instalador inicial ya ejecuta estos pasos.
 
 El aviso de progreso es global y permanece al navegar entre Alertas, Fuentes y Parametros. Iniciar revision aparece en verde y Detener revision en rojo. Categorias y severidades se muestran en espanol. El resaltado marca nombres/alias y afirmaciones que coinciden literalmente con el texto mostrado; el motivo de la IA se presenta aparte, identificado como interpretacion y no como un hecho comprobado.
+
+## Desconexion y apagado
+
+Si no se puede consultar el backend, el aviso conserva el ultimo progreso y el boton aparece amarillo como "Verificando estado". No se interpreta una peticion fallida como una revision terminada. Cuando el backend confirma el resultado, se muestra completada, detenida o interrumpida, con la causa y el numero de fuentes completadas. Ese aviso se cierra manualmente. El ultimo estado se conserva en `apps/backend/.review-state.local`; un reinicio inesperado convierte una revision pendiente en interrumpida.
+
+El boton **Apagar sistema** solicita al supervisor local cerrar las revisiones, los servidores y el contenedor PostgreSQL. Se permite un margen de 15 segundos para terminar la operacion en curso antes de cerrar los procesos registrados. El navegador de extraccion tambien pertenece a esos procesos. Docker Desktop queda abierto; no se borran datos ni volumenes.
+
+Si el frontend o el backend no responde, ejecuta **detener.bat**. Puede repetirse si Docker no responde en el primer intento. El apagado usa `.runtime.local`, creado por el `init.bat` actualizado, y verifica PID, fecha de creacion y comando antes de cerrar un proceso. No cierra procesos encontrados solamente por nombre o puerto. Una ejecucion iniciada con un lanzador antiguo debe cerrarse una vez por el metodo anterior y luego iniciarse con el nuevo `init.bat`.
+
+El supervisor recibe las solicitudes locales mediante `.shutdown-request.local`. Estos archivos estan excluidos de Git. Los resultados del apagado solicitado desde la aplicacion quedan en `logs/shutdown.log` y `logs/shutdown-error.log`. El boton confirma que se solicito el apagado; una vez que los servidores se cierran la pagina ya no puede consultar su estado. Ante dudas usa detener.bat o revisa esos registros.

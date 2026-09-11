@@ -1,5 +1,10 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
+const { after } = require('node:test');
+const fs = require('node:fs');
+const path = require('node:path');
+process.env.REVIEW_STATE_FILE = path.join(require('node:os').tmpdir(), `review-test-${require('node:crypto').randomUUID()}.local`);
+after(() => { if (fs.existsSync(process.env.REVIEW_STATE_FILE)) fs.unlinkSync(process.env.REVIEW_STATE_FILE); });
 const session = require('../dist/facebook/lib/session');
 const browser = require('../dist/facebook/lib/browser');
 const { FacebookService } = require('../dist/facebook/facebook.service');
@@ -25,6 +30,9 @@ test('reports each source and clears running state after a partial failure', asy
   assert.equal(observed[0].reviewRunId, 12);
   assert.equal(results[1].ok, true);
   assert.equal(service.getCheckStatus().running, false);
+  assert.equal(service.getCheckStatus().phase, 'INTERRUPTED');
+  assert.equal(service.getCheckStatus().completedSources, 1);
+  assert.match(service.getCheckStatus().error, /fallo simulado/);
   assert.equal(service.getCheckStatus().startedAt, observed[0].startedAt);
 });
 
@@ -65,4 +73,31 @@ test('cancellation stops before the next source and clears state', async () => {
   assert.equal((await service.checkAllActiveSources()).length, 1);
   assert.equal(service.getCheckStatus().running, false);
   assert.equal(service.getCheckStatus().cancellationRequested, false);
+  assert.equal(service.getCheckStatus().phase, 'CANCELLED');
+});
+
+test('session failure remains visible after the request finishes', async () => {
+  session.hasStoredSession = async () => false;
+  const service = new FacebookService({ source: { findMany: async () => [{ id: '1', name: 'Una' }] } }, {});
+  await service.checkAllActiveSources();
+  assert.equal(service.getCheckStatus().phase, 'INTERRUPTED');
+  assert.match(service.getCheckStatus().error, /sesión/);
+});
+
+test('process restart preserves interruption and shutdown rejects new reviews', async () => {
+  const { newReviewState, ReviewStateStore } = require('../dist/facebook/review-state');
+  new ReviewStateStore().write(newReviewState());
+  const service = new FacebookService({}, {});
+  assert.equal(service.getCheckStatus().phase, 'INTERRUPTED');
+  assert.match(service.getCheckStatus().error, /reinició/);
+  service.prepareShutdown();
+  await assert.rejects(service.checkAllActiveSources(), /apagando/);
+});
+
+test('shutdown control rejects remote addresses and foreign browser origins', () => {
+  const { assertLocalControl } = require('../dist/facebook/system.controller');
+  assert.doesNotThrow(() => assertLocalControl({ ip: '127.0.0.1', headers: { 'x-scrapping-control': 'shutdown', origin: 'http://localhost:5173' } }));
+  assert.throws(() => assertLocalControl({ ip: '192.168.1.10', headers: { 'x-scrapping-control': 'shutdown' } }));
+  assert.throws(() => assertLocalControl({ ip: '127.0.0.1', headers: { 'x-scrapping-control': 'shutdown', origin: 'https://example.com' } }));
+  assert.throws(() => assertLocalControl({ ip: '127.0.0.1', headers: {} }));
 });

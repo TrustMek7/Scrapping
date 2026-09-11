@@ -16,6 +16,12 @@ export const FACEBOOK_SESSION_DIR = path.join(
 const OPERATION_TIMEOUT_MS = 11 * 60 * 1000;
 
 let queueTail: Promise<void> = Promise.resolve();
+const activeContexts = new Set<BrowserContext>();
+let shuttingDown = false;
+export async function stopFacebookBrowsers() {
+  shuttingDown = true;
+  await Promise.allSettled([...activeContexts].map(context => context.close()));
+}
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timeoutHandle: ReturnType<typeof setTimeout>;
@@ -25,7 +31,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
       () =>
         reject(
           new FacebookError(
-            "BROWSER_ERROR",
+            "TIMEOUT",
             "La operación de Facebook tardó demasiado y se canceló.",
             504,
           ),
@@ -72,6 +78,7 @@ export function withFacebookContext<T>(
   timeoutMs: number = OPERATION_TIMEOUT_MS,
 ) {
   return runWithBrowserLock(async () => {
+    if (shuttingDown) throw new FacebookError("BROWSER_ERROR", "El sistema se está apagando.");
     let context: BrowserContext | null = null;
 
     try {
@@ -79,22 +86,34 @@ export function withFacebookContext<T>(
       context = await chromium.launchPersistentContext(FACEBOOK_SESSION_DIR, {
         headless,
       });
+      activeContexts.add(context);
+      if (shuttingDown) throw new FacebookError("BROWSER_ERROR", "El sistema se está apagando.");
       console.info(`[Facebook][tiempo] iniciar Chromium: ${Date.now() - launchStartedAt} ms`);
       context.setDefaultTimeout(15_000);
       context.setDefaultNavigationTimeout(45_000);
-      return await operation(context);
+      // Expire the operation inside the context's try/finally so Chromium is
+      // closed before the caller marks the review as finished.
+      return await withTimeout(operation(context), timeoutMs);
     } catch (error) {
       if (error instanceof FacebookError) {
         throw error;
       }
 
       console.error("[Facebook] Browser operation failed", error);
+      const message = error instanceof Error ? error.message : "";
+      if (/net::ERR_|ECONNRESET|ECONNREFUSED|ENOTFOUND|fetch failed/i.test(message)) {
+        throw new FacebookError("CONNECTION_ERROR", "No se pudo conectar con Facebook. Revisa la conexión a internet o la disponibilidad del servicio.", 503);
+      }
+      if (/timeout|timed out/i.test(message)) {
+        throw new FacebookError("TIMEOUT", "Facebook no respondió dentro del tiempo de espera.", 504);
+      }
       throw new FacebookError(
         "BROWSER_ERROR",
         "No se pudo completar la operación del navegador.",
       );
     } finally {
       await context?.close().catch(() => undefined);
+      if (context) activeContexts.delete(context);
     }
-  }, timeoutMs);
+  }, timeoutMs + 60000);
 }

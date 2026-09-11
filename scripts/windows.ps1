@@ -2,6 +2,7 @@ param([ValidateSet('Install', 'Start')][string]$Mode = 'Start')
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $repoRoot
+. (Join-Path $PSScriptRoot 'processes.ps1')
 
 function Run([string]$Command, [string[]]$Arguments) {
     & $Command @Arguments
@@ -166,11 +167,24 @@ try {
         $pnpmPath = (Get-Command pnpm.cmd).Source.Replace("'", "''")
         New-Item -ItemType Directory -Path (Join-Path $repoRoot 'logs') -Force | Out-Null
         $serverIndex = 0
+        $runtime = @{ root = $repoRoot; runId = [guid]::NewGuid().ToString(); backendPort = [int]$config.PORT }
+        $registry = Join-Path $repoRoot '.runtime.local'
+        function Save-Runtime {
+            $temporary = Join-Path $repoRoot '.runtime.tmp.local'
+            [IO.File]::WriteAllText($temporary, ($runtime | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
+            Move-Item -LiteralPath $temporary -Destination $registry -Force
+        }
         foreach ($command in @("& '$pnpmPath' --filter backend start:prod", "& '$pnpmPath' --filter web preview --host 127.0.0.1 --port 5173 --strictPort")) {
             $serverName = @('backend', 'web')[$serverIndex++]
             $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
-            Start-Process powershell.exe -WorkingDirectory $repoRoot -WindowStyle Hidden -ArgumentList @('-NoProfile', '-EncodedCommand', $encoded) -RedirectStandardOutput (Join-Path $repoRoot "logs/$serverName.log") -RedirectStandardError (Join-Path $repoRoot "logs/$serverName-error.log")
+            $server = Start-Process powershell.exe -WorkingDirectory $repoRoot -WindowStyle Hidden -ArgumentList @('-NoProfile', '-EncodedCommand', $encoded) -RedirectStandardOutput (Join-Path $repoRoot "logs/$serverName.log") -RedirectStandardError (Join-Path $repoRoot "logs/$serverName-error.log") -PassThru
+            $runtime[$serverName] = Get-ManagedProcessRecord $server.Id
+            Save-Runtime
         }
+        $supervisorPath = '"' + (Join-Path $PSScriptRoot 'supervisor.ps1') + '"'
+        $supervisor = Start-Process powershell.exe -WorkingDirectory $repoRoot -WindowStyle Hidden -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $supervisorPath, '-RunId', $runtime.runId) -RedirectStandardOutput (Join-Path $repoRoot 'logs/shutdown.log') -RedirectStandardError (Join-Path $repoRoot 'logs/shutdown-error.log') -PassThru
+        $runtime.supervisor = Get-ManagedProcessRecord $supervisor.Id
+        Save-Runtime
         $ready = $false
         for ($i = 0; $i -lt 60; $i++) {
             try {

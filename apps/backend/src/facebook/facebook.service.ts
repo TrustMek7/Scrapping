@@ -6,9 +6,11 @@ import { PrismaService } from "../prisma/prisma.service";
 import { AnalysisService } from "../analysis/analysis.service";
 import { checkSession, hasStoredSession, resetSession, startLogin } from "./lib/session";
 import { getLatestPagePosts, getLatestPagePostsInContext } from "./lib/navigation";
-import { withFacebookContext } from "./lib/browser";
+import { withFacebookContext, stopFacebookBrowsers } from "./lib/browser";
 import { normalizeFacebookPageUrl } from "./lib/validators";
 import { getFacebookImage } from "./lib/image-cache";
+import { newReviewState, ReviewState, ReviewStateStore } from "./review-state";
+import { FacebookError } from "./lib/errors";
 
 const REQUIRED_POST_LIMIT = 10;
 // Overhead fijo de arrancar/cerrar Chromium para UNA fuente (referencia para
@@ -53,8 +55,10 @@ export interface CheckAllSourcesResultItem {
 @Injectable()
 export class FacebookService {
   private readonly logger = new Logger(FacebookService.name);
-  private activeCheck: { cancellationRequested: boolean; startedAt: string; sourceName: string | null; sourceIndex: number; totalSources: number; reviewRunId?: number; warnings: string[] } | null = null;
-  private lastCheckStartedAt: string | null = null;
+  private activeCheck: ReviewState | null = null;
+  private readonly stateStore = new ReviewStateStore();
+  private lastCheck: ReviewState | null = this.stateStore.read();
+  private shuttingDown = false;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -66,6 +70,7 @@ export class FacebookService {
   }
 
   login() {
+    if (this.shuttingDown) throw new ConflictException("El sistema se está apagando.");
     return startLogin();
   }
 
@@ -78,37 +83,56 @@ export class FacebookService {
   }
 
   getCheckStatus() {
+    const state = this.activeCheck ?? this.lastCheck;
+    if (state) return { ...state, warnings: [...state.warnings] };
     return {
-      running: this.activeCheck !== null,
-      cancellationRequested: this.activeCheck?.cancellationRequested ?? false,
-      startedAt: this.activeCheck?.startedAt ?? this.lastCheckStartedAt,
-      sourceName: this.activeCheck?.sourceName ?? null,
-      sourceIndex: this.activeCheck?.sourceIndex ?? 0,
-      totalSources: this.activeCheck?.totalSources ?? 0,
-      reviewRunId: this.activeCheck?.reviewRunId ?? null,
-      warnings: this.activeCheck?.warnings ?? [],
+      running: false, phase: "IDLE", id: null, cancellationRequested: false,
+      startedAt: null, finishedAt: null, sourceName: null, sourceIndex: 0,
+      completedSources: 0, totalSources: 0, reviewRunId: null, warnings: [], error: null,
     };
   }
 
   cancelActiveCheck() {
-    if (!this.activeCheck) return { running: false, cancellationRequested: false };
+    if (!this.activeCheck) return this.getCheckStatus();
     this.activeCheck.cancellationRequested = true;
+    this.saveState(this.activeCheck);
     this.logger.warn("[FACEBOOK] se solicitó detener la revisión activa");
     return this.getCheckStatus();
   }
 
   private beginCheck() {
+    if (this.shuttingDown) throw new ConflictException("El sistema se está apagando.");
     if (this.activeCheck) {
       throw new ConflictException("Ya hay una revisión de Facebook en ejecución.");
     }
-    const check = { cancellationRequested: false, startedAt: new Date().toISOString(), sourceName: null as string | null, sourceIndex: 0, totalSources: 0, reviewRunId: undefined as number | undefined, warnings: [] as string[] };
-    this.lastCheckStartedAt = check.startedAt;
+    const check = newReviewState();
     this.activeCheck = check;
+    this.saveState(check);
     return check;
   }
 
-  private finishCheck(check: { cancellationRequested: boolean }) {
-    if (this.activeCheck === check) this.activeCheck = null;
+  private saveState(check: ReviewState) {
+    try { this.stateStore.write(check); } catch { this.logger.warn("No se pudo guardar el estado de revisión en disco."); }
+  }
+
+  prepareShutdown() {
+    if (!this.shuttingDown) {
+      const timer = setTimeout(() => { void stopFacebookBrowsers(); }, this.activeCheck ? 10000 : 0);
+      timer.unref();
+    }
+    this.shuttingDown = true;
+    return this.cancelActiveCheck();
+  }
+
+  private finishCheck(check: ReviewState) {
+    if (this.activeCheck !== check) return;
+    check.running = false;
+    check.phase = check.cancellationRequested ? "CANCELLED" : check.error ? "INTERRUPTED" : "COMPLETED";
+    check.cancellationRequested = false;
+    check.finishedAt = new Date().toISOString();
+    this.lastCheck = check;
+    this.saveState(check);
+    this.activeCheck = null;
   }
 
   /**
@@ -124,26 +148,32 @@ export class FacebookService {
     sourceId: string,
     headless = true,
   ): Promise<CheckSourcePostOutcome[]> {
-    const source = await this.prisma.source.findUnique({ where: { id: sourceId } });
-    if (!source) {
-      throw new NotFoundException("Fuente no encontrada");
-    }
-    if (source.type !== "FACEBOOK") {
-      throw new BadRequestException("Esta acción solo está disponible para fuentes de tipo FACEBOOK");
-    }
-
     const check = this.beginCheck();
-    check.sourceName = source.name;
-    check.sourceIndex = 1;
     check.totalSources = 1;
     try {
+      const source = await this.prisma.source.findUnique({ where: { id: sourceId } });
+      if (!source) {
+        throw new NotFoundException("Fuente no encontrada");
+      }
+      if (source.type !== "FACEBOOK") {
+        throw new BadRequestException("Esta acción solo está disponible para fuentes de tipo FACEBOOK");
+      }
+
+      check.sourceName = source.name;
+      check.sourceIndex = 1;
       check.reviewRunId = (await this.prisma.reviewRun.create({ data: {} })).id;
-      return await this.checkSource(
+      this.saveState(check);
+      const results = await this.checkSource(
         source,
         (pageUrl, onPost, knownPostUrls, shouldCancel) =>
           getLatestPagePosts(pageUrl, REQUIRED_POST_LIMIT, headless, onPost, knownPostUrls, shouldCancel),
-        () => check.cancellationRequested,
+        () => check.cancellationRequested || !check.running,
       );
+      if (!check.cancellationRequested) check.completedSources = 1;
+      return results;
+    } catch (error) {
+      check.error = error instanceof Error ? error.message : "La revisión se interrumpió.";
+      throw error;
     } finally {
       this.finishCheck(check);
     }
@@ -171,6 +201,7 @@ export class FacebookService {
     shouldCancel: () => boolean,
   ): Promise<CheckSourcePostOutcome[]> {
     const outcomes: CheckSourcePostOutcome[] = [];
+    const run = this.activeCheck;
     let newCount = 0;
     const sourceStartedAt = Date.now();
 
@@ -196,9 +227,9 @@ export class FacebookService {
         if (shouldCancel()) return { stop: true };
         if (!post.text || post.text.trim().length === 0) {
           const noTextReason = describeMissingText(post);
-          this.activeCheck?.warnings.push(`${source.name}: ${noTextReason}`);
+          run?.warnings.push(`${source.name}: ${noTextReason}`);
           const result = await this.analysisService.persistWithoutText({
-            reviewRunId: this.activeCheck?.reviewRunId,
+            reviewRunId: run?.reviewRunId,
             noTextReason,
             sourceId: source.id,
             title: `Publicación de ${post.author.name ?? source.name}`,
@@ -227,7 +258,7 @@ export class FacebookService {
         // pasar a la siguiente (ver runAndPersist/maybeCreateAlert en AnalysisService).
         const analysisStartedAt = Date.now();
         const result = await this.analysisService.runAndPersist({
-          reviewRunId: this.activeCheck?.reviewRunId,
+          reviewRunId: run?.reviewRunId,
           sourceId: source.id,
           title: `Publicación de ${post.author.name ?? source.name}`,
           content: post.text,
@@ -249,6 +280,9 @@ export class FacebookService {
           category: result.analysis?.category ?? null,
           alertCreated: !!result.alert,
         });
+        if (result.analysis?.status === "FAILED" && run) {
+          run.error = result.analysis.error ?? "Falló el análisis de una publicación.";
+        }
 
         if (!result.deduplicated) newCount += 1;
         return { stop: false };
@@ -296,21 +330,23 @@ export class FacebookService {
    * devuelve al final.
    */
   async checkAllActiveSources(): Promise<CheckAllSourcesResultItem[]> {
-    const sources = await this.prisma.source.findMany({
-      where: { type: "FACEBOOK", status: "ACTIVE" },
-    });
-
-    if (sources.length === 0) return [];
-
-    if (!(await hasStoredSession())) {
-      const error = "Necesitas iniciar sesión en Facebook.";
-      return sources.map((source) => ({ sourceId: source.id, sourceName: source.name, ok: false, error }));
-    }
-
     const check = this.beginCheck();
-    check.totalSources = sources.length;
     try {
+      const sources = await this.prisma.source.findMany({
+        where: { type: "FACEBOOK", status: "ACTIVE" },
+      });
+
+      check.totalSources = sources.length;
+      if (sources.length === 0) return [];
+
+      if (!(await hasStoredSession())) {
+        const error = "Necesitas iniciar sesión en Facebook.";
+        check.error = error;
+        return sources.map((source) => ({ sourceId: source.id, sourceName: source.name, ok: false, error }));
+      }
+
       check.reviewRunId = (await this.prisma.reviewRun.create({ data: {} })).id;
+      this.saveState(check);
       const results: CheckAllSourcesResultItem[] = [];
       const batchTimeoutMs = Math.max(MIN_BATCH_TIMEOUT_MS, sources.length * PER_SOURCE_TIMEOUT_MS);
 
@@ -321,6 +357,7 @@ export class FacebookService {
             if (check.cancellationRequested) break;
             check.sourceName = source.name;
             check.sourceIndex += 1;
+            this.saveState(check);
             try {
               const outcomes = await this.checkSource(
                 source,
@@ -333,8 +370,9 @@ export class FacebookService {
                     knownPostUrls,
                     shouldCancel,
                   ),
-                () => check.cancellationRequested,
+                () => check.cancellationRequested || !check.running,
               );
+              if (!check.cancellationRequested) check.completedSources += 1;
               results.push({
                 sourceId: source.id,
                 sourceName: source.name,
@@ -345,8 +383,11 @@ export class FacebookService {
               });
             } catch (error) {
               const message = error instanceof Error ? error.message : "Error desconocido.";
+              check.error = message;
+              check.warnings.push(`${source.name}: ${message}`);
               this.logger.warn(`[FACEBOOK] falló la revisión de "${source.name}": ${message}`);
               results.push({ sourceId: source.id, sourceName: source.name, ok: false, error: message });
+              if (error instanceof FacebookError && ["SESSION_REQUIRED", "SESSION_EXPIRED"].includes(error.code)) break;
             }
           }
         },
@@ -354,6 +395,9 @@ export class FacebookService {
       );
 
       return results;
+    } catch (error) {
+      check.error = error instanceof Error ? error.message : "La revisión se interrumpió.";
+      throw error;
     } finally {
       this.finishCheck(check);
     }

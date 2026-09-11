@@ -59,7 +59,8 @@ const SESSION_LABEL: Record<FacebookSessionStatus | "checking" | "error", string
 
 export default function MonitoringAlerts() {
   const toast = useToast();
-  const review = useReview();
+  const reviewContext = useReview();
+  const review = reviewContext.status;
   const [alerts, setAlerts] = useState<AlertListItem[]>([]);
   const [exporting, setExporting] = useState(false);
   const [exportingHistory, setExportingHistory] = useState(false);
@@ -82,7 +83,7 @@ export default function MonitoringAlerts() {
   const [loginPending, setLoginPending] = useState(false);
   const [checking, setChecking] = useState(false);
   const [checkingAll, setCheckingAll] = useState(false);
-  const [checkRunning, setCheckRunning] = useState(false);
+  const checkRunning = !!review?.running || reviewContext.pending;
   const [cancelPending, setCancelPending] = useState(false);
   const cancelRequestedRef = useRef(false);
   const [checkingAllResults, setCheckingAllResults] = useState<CheckAllSourcesResultItem[]>([]);
@@ -127,9 +128,7 @@ export default function MonitoringAlerts() {
       .catch(() => undefined);
   }, []);
 
-  useEffect(() => {
-    setCheckRunning(review?.running ?? false);
-  }, [review?.running]);
+
 
   useEffect(() => {
     let disposed = false;
@@ -211,7 +210,7 @@ export default function MonitoringAlerts() {
     if (!selectedSourceId) return;
     cancelRequestedRef.current = false;
     setChecking(true);
-    setCheckRunning(true);
+    reviewContext.beginRequest();
     try {
       const outcomes = await checkFacebookSource(selectedSourceId, headless);
       console.log("[checkFacebookSource] respuesta del backend:", outcomes);
@@ -242,7 +241,7 @@ export default function MonitoringAlerts() {
       toast.error((err as Error).message);
     } finally {
       setChecking(false);
-      setCheckRunning(false);
+      reviewContext.endRequest();
       cancelRequestedRef.current = false;
     }
   };
@@ -250,7 +249,7 @@ export default function MonitoringAlerts() {
   const handleCheckAll = async () => {
     cancelRequestedRef.current = false;
     setCheckingAll(true);
-    setCheckRunning(true);
+    reviewContext.beginRequest();
     setCheckingAllResults([]);
     setCheckingAllInitialPublicationCount(recentPublications.length);
 
@@ -282,7 +281,7 @@ export default function MonitoringAlerts() {
       toast.error((err as Error).message);
     } finally {
       setCheckingAll(false);
-      setCheckRunning(false);
+      reviewContext.endRequest();
       cancelRequestedRef.current = false;
       load();
       loadRecentPublications();
@@ -294,7 +293,7 @@ export default function MonitoringAlerts() {
     setCancelPending(true);
     try {
       const status = await cancelFacebookCheck();
-      setCheckRunning(status.running);
+      reviewContext.endRequest();
       toast.success(
         status.cancellationRequested
           ? "Detención solicitada. Se terminará la operación en curso y no se continuará con las siguientes."
@@ -531,7 +530,7 @@ export default function MonitoringAlerts() {
             <Button
               size="sm"
               onClick={() => handleCheckSource(true)}
-              disabled={checkRunning || checking || checkingAll || sessionStatus !== "active" || !selectedSourceId}
+              disabled={reviewContext.unavailable || checkRunning || sessionStatus !== "active" || !selectedSourceId}
             >
               {checking ? "Revisando..." : "Revisar publicaciones nuevas"}
             </Button>
@@ -539,17 +538,17 @@ export default function MonitoringAlerts() {
               size="sm"
               variant="outline"
               onClick={() => handleCheckSource(false)}
-              disabled={checkRunning || checking || checkingAll || sessionStatus !== "active" || !selectedSourceId}
+              disabled={reviewContext.unavailable || checkRunning || sessionStatus !== "active" || !selectedSourceId}
             >
               {checking ? "Revisando..." : "Ver en vivo (debug)"}
             </Button>
             <Button
               size="sm"
-              className={checkRunning || checking || checkingAll ? "!bg-red-600 !text-white hover:!bg-red-700" : "!bg-green-700 !text-white hover:!bg-green-800"}
-              onClick={checkRunning || checking || checkingAll ? handleCancelCheck : handleCheckAll}
-              disabled={cancelPending || (!(checkRunning || checking || checkingAll) && (sessionStatus !== "active" || facebookSources.length === 0))}
+              className={reviewContext.unavailable ? "!bg-amber-500 !text-white" : checkRunning ? "!bg-red-600 !text-white hover:!bg-red-700" : "!bg-green-700 !text-white hover:!bg-green-800"}
+              onClick={checkRunning ? handleCancelCheck : handleCheckAll}
+              disabled={reviewContext.unavailable || cancelPending || (!(checkRunning) && (sessionStatus !== "active" || facebookSources.length === 0))}
             >
-              {cancelPending ? "Deteniendo..." : checkRunning || checking || checkingAll ? "Detener revisión" : `Iniciar revisión (${facebookSources.length} fuentes)`}
+              {reviewContext.unavailable ? "Verificando estado..." : cancelPending ? "Deteniendo..." : checkRunning ? "Detener revisión" : `Iniciar revisión (${facebookSources.length} fuentes)`}
             </Button>
           </div>
           {checkingAll && (
