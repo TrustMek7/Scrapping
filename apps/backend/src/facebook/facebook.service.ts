@@ -5,18 +5,14 @@ import type { OnPostResult } from "./lib/navigation";
 import { PrismaService } from "../prisma/prisma.service";
 import { AnalysisService } from "../analysis/analysis.service";
 import { checkSession, hasStoredSession, resetSession, startLogin } from "./lib/session";
-import { getLatestPagePosts, getLatestPagePostsInContext } from "./lib/navigation";
-import { withFacebookContext, stopFacebookBrowsers } from "./lib/browser";
+import { getLatestPagePosts } from "./lib/navigation";
+import { stopFacebookBrowsers } from "./lib/browser";
 import { normalizeFacebookPageUrl } from "./lib/validators";
 import { getFacebookImage } from "./lib/image-cache";
 import { newReviewState, ReviewState, ReviewStateStore } from "./review-state";
 import { FacebookError } from "./lib/errors";
 
 const REQUIRED_POST_LIMIT = 10;
-// Overhead fijo de arrancar/cerrar Chromium para UNA fuente (referencia para
-// dimensionar el margen del lote entero en checkAllActiveSources).
-const PER_SOURCE_TIMEOUT_MS = 90 * 1000;
-const MIN_BATCH_TIMEOUT_MS = 11 * 60 * 1000;
 
 export function describeMissingText(post: Pick<FacebookPost, "kind" | "images">): string {
   switch (post.kind) {
@@ -321,13 +317,9 @@ export class FacebookService {
   }
 
   /**
-   * Revisa todas las Source de tipo FACEBOOK activas, una por una, dentro de
-   * UN SOLO navegador reusado para todo el lote — arrancar/cerrar Chromium
-   * por fuente es puro overhead fijo que no depende del contenido de cada
-   * una, así que evitarlo repetir N veces ahorra tiempo real sin tocar la
-   * lógica de extracción. El fallo de una fuente no detiene a las demás ni
-   * cierra el navegador — cada resultado (éxito o error) se acumula y se
-   * devuelve al final.
+   * Revisa todas las fuentes activas de Facebook una por una. Cada fuente
+   * abre su propio contexto para que un timeout o cierre inesperado no deje
+   * inutilizable el navegador de las fuentes siguientes.
    */
   async checkAllActiveSources(): Promise<CheckAllSourcesResultItem[]> {
     const check = this.beginCheck();
@@ -348,51 +340,44 @@ export class FacebookService {
       check.reviewRunId = (await this.prisma.reviewRun.create({ data: {} })).id;
       this.saveState(check);
       const results: CheckAllSourcesResultItem[] = [];
-      const batchTimeoutMs = Math.max(MIN_BATCH_TIMEOUT_MS, sources.length * PER_SOURCE_TIMEOUT_MS);
 
-      await withFacebookContext<void>(
-        true,
-        async (context) => {
-          for (const source of sources) {
-            if (check.cancellationRequested) break;
-            check.sourceName = source.name;
-            check.sourceIndex += 1;
-            this.saveState(check);
-            try {
-              const outcomes = await this.checkSource(
-                source,
-                (pageUrl, onPost, knownPostUrls, shouldCancel) =>
-                  getLatestPagePostsInContext(
-                    context,
-                    pageUrl,
-                    REQUIRED_POST_LIMIT,
-                    onPost,
-                    knownPostUrls,
-                    shouldCancel,
-                  ),
-                () => check.cancellationRequested || !check.running,
-              );
-              if (!check.cancellationRequested) check.completedSources += 1;
-              results.push({
-                sourceId: source.id,
-                sourceName: source.name,
-                ok: true,
-                newPublications: outcomes.filter((o) => o.ok && !o.deduplicated).length,
-                newAlerts: outcomes.filter((o) => o.alertCreated).length,
-                warnings: outcomes.flatMap((o) => o.error ? [o.error] : []),
-              });
-            } catch (error) {
-              const message = error instanceof Error ? error.message : "Error desconocido.";
-              check.error = message;
-              check.warnings.push(`${source.name}: ${message}`);
-              this.logger.warn(`[FACEBOOK] falló la revisión de "${source.name}": ${message}`);
-              results.push({ sourceId: source.id, sourceName: source.name, ok: false, error: message });
-              if (error instanceof FacebookError && ["SESSION_REQUIRED", "SESSION_EXPIRED"].includes(error.code)) break;
-            }
-          }
-        },
-        batchTimeoutMs,
-      );
+      for (const source of sources) {
+        if (check.cancellationRequested) break;
+        check.sourceName = source.name;
+        check.sourceIndex += 1;
+        this.saveState(check);
+        try {
+          const outcomes = await this.checkSource(
+            source,
+            (pageUrl, onPost, knownPostUrls, shouldCancel) =>
+              getLatestPagePosts(
+                pageUrl,
+                REQUIRED_POST_LIMIT,
+                true,
+                onPost,
+                knownPostUrls,
+                shouldCancel,
+              ),
+            () => check.cancellationRequested || !check.running,
+          );
+          if (!check.cancellationRequested) check.completedSources += 1;
+          results.push({
+            sourceId: source.id,
+            sourceName: source.name,
+            ok: true,
+            newPublications: outcomes.filter((o) => o.ok && !o.deduplicated).length,
+            newAlerts: outcomes.filter((o) => o.alertCreated).length,
+            warnings: outcomes.flatMap((o) => o.error ? [o.error] : []),
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Error desconocido.";
+          check.error = message;
+          check.warnings.push(`${source.name}: ${message}`);
+          this.logger.warn(`[FACEBOOK] falló la revisión de "${source.name}": ${message}`);
+          results.push({ sourceId: source.id, sourceName: source.name, ok: false, error: message });
+          if (error instanceof FacebookError && ["SESSION_REQUIRED", "SESSION_EXPIRED"].includes(error.code)) break;
+        }
+      }
 
       return results;
     } catch (error) {

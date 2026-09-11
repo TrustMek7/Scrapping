@@ -104,6 +104,13 @@ export function withFacebookContext<T>(
       if (/net::ERR_|ECONNRESET|ECONNREFUSED|ENOTFOUND|fetch failed/i.test(message)) {
         throw new FacebookError("CONNECTION_ERROR", "No se pudo conectar con Facebook. Revisa la conexión a internet o la disponibilidad del servicio.", 503);
       }
+      if (/Target page, context or browser has been closed|Target closed|Browser has been closed/i.test(message)) {
+        throw new FacebookError(
+          "BROWSER_ERROR",
+          "El navegador de Facebook se cerró durante la revisión. Inicia otra revisión.",
+          503,
+        );
+      }
       if (/timeout|timed out/i.test(message)) {
         throw new FacebookError("TIMEOUT", "Facebook no respondió dentro del tiempo de espera.", 504);
       }

@@ -21,3 +21,15 @@ test('network failure returns a connection-specific message', async () => {
   });
   await assert.rejects(withFacebookContext(true, async () => { throw new Error('net::ERR_INTERNET_DISCONNECTED'); }), error => error.code === 'CONNECTION_ERROR');
 });
+
+test('closed browser context returns a controlled browser error', async () => {
+  chromium.launchPersistentContext = async () => ({
+    setDefaultTimeout() {}, setDefaultNavigationTimeout() {}, close: async () => {},
+  });
+  await assert.rejects(
+    withFacebookContext(true, async () => {
+      throw new Error('browserContext.newPage: Target page, context or browser has been closed');
+    }),
+    error => error.code === 'BROWSER_ERROR' && /se cerró durante la revisión/.test(error.message),
+  );
+});
